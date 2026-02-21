@@ -126,6 +126,8 @@ In-TUI commands:
 - `Up` / `Down`: line scroll in focused panel
 - `PgUp` / `PgDn`: page scroll in focused panel
 - `Home` / `End`: jump oldest/newest in focused panel
+- `Mouse wheel`: scroll focused panel (click panel to focus it)
+- `Ctrl+N`: insert newline in multi-line prompt composer
 - `/clear`: reset panes
 - `/quit` or `/exit`: close client
 
@@ -133,6 +135,7 @@ TUI behavior:
 
 - Multi-turn thread continuity is preserved for repeated prompts under the same `application_id`/`thread_id`.
 - Reasoning and output stream panes preserve prior run content instead of clearing on completion.
+- Panels render visible scrollbars and clamp content to avoid spillover into neighboring panes.
 
 ## Container Runtime
 

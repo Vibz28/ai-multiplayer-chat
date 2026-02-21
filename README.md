@@ -53,4 +53,5 @@ The TUI supports:
 - run diagnostics panel with LangSmith-style metadata (run IDs, model selection, token usage, latency, tool calls)
 - persistent JSONL run/event logging (`logs/langgraph_tui_events.jsonl` by default)
 - multi-turn continuity with preserved reasoning/output history across runs
-- per-panel scrolling (`Tab`, `Shift+Tab`, `Up/Down`, `PgUp/PgDn`, `Home/End`)
+- per-panel scrolling with visible scrollbars (`Tab`, `Shift+Tab`, `Up/Down`, `PgUp/PgDn`, `Home/End`, mouse wheel)
+- multi-line prompt composer (`Ctrl+N` to insert newline before submit)

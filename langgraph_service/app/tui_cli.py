@@ -187,6 +187,7 @@ class LangGraphTui:
         self._scroll_offsets = {panel: 0 for panel in self._panel_order}
         self._panel_max_offsets = {panel: 0 for panel in self._panel_order}
         self._panel_page_sizes = {panel: 10 for panel in self._panel_order}
+        self._panel_regions: dict[str, tuple[int, int, int, int]] = {}
 
         # Prevent a large burst of events from being consumed in one frame.
         self._max_events_per_tick = 32
@@ -205,6 +206,11 @@ class LangGraphTui:
         curses.curs_set(1)
         screen.nodelay(True)
         screen.keypad(True)
+        curses.mouseinterval(0)
+        try:
+            curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+        except curses.error:
+            pass
 
         while self._running:
             self._drain_event_queue()
@@ -217,6 +223,16 @@ class LangGraphTui:
 
     def _cycle_focus(self, step: int) -> None:
         self._panel_focus_index = (self._panel_focus_index + step) % len(self._panel_order)
+
+    def _set_focus_panel(self, panel_id: str) -> None:
+        if panel_id in self._panel_order:
+            self._panel_focus_index = self._panel_order.index(panel_id)
+
+    def _panel_from_coords(self, y: int, x: int) -> str | None:
+        for panel_id, (py, px, pheight, pwidth) in self._panel_regions.items():
+            if py <= y < py + pheight and px <= x < px + pwidth:
+                return panel_id
+        return None
 
     def _scroll_focused(self, delta: int) -> None:
         panel = self._focused_panel()
@@ -272,6 +288,39 @@ class LangGraphTui:
             self._jump_scroll(to_top=False)
             return
 
+        if key == curses.KEY_MOUSE:
+            try:
+                _, mouse_x, mouse_y, _, button_state = curses.getmouse()
+            except curses.error:
+                return
+
+            panel = self._panel_from_coords(mouse_y, mouse_x)
+            if panel is not None:
+                self._set_focus_panel(panel)
+
+            wheel_up_mask = (
+                getattr(curses, "BUTTON4_PRESSED", 0)
+                | getattr(curses, "BUTTON4_CLICKED", 0)
+                | getattr(curses, "BUTTON4_DOUBLE_CLICKED", 0)
+                | getattr(curses, "BUTTON4_TRIPLE_CLICKED", 0)
+            )
+            wheel_down_mask = (
+                getattr(curses, "BUTTON5_PRESSED", 0)
+                | getattr(curses, "BUTTON5_CLICKED", 0)
+                | getattr(curses, "BUTTON5_DOUBLE_CLICKED", 0)
+                | getattr(curses, "BUTTON5_TRIPLE_CLICKED", 0)
+            )
+
+            if button_state & wheel_up_mask:
+                self._scroll_focused(3)
+                return
+
+            if button_state & wheel_down_mask:
+                self._scroll_focused(-3)
+                return
+
+            return
+
         if key in (10, 13):  # Enter
             value = self._input_buffer.strip()
             self._input_buffer = ""
@@ -301,6 +350,10 @@ class LangGraphTui:
 
         if key in (curses.KEY_BACKSPACE, 8, 127):
             self._input_buffer = self._input_buffer[:-1]
+            return
+
+        if key == 14:  # Ctrl+N inserts newline in prompt composer.
+            self._input_buffer += "\n"
             return
 
         if 32 <= key <= 126:
@@ -451,7 +504,8 @@ class LangGraphTui:
         screen.erase()
         height, width = screen.getmaxyx()
 
-        input_height = 3
+        composer_rows = 3
+        input_height = 2 + composer_rows
         main_height = max(8, height - input_height)
         left_width = max(45, int(width * 0.65))
         right_width = width - left_width
@@ -462,6 +516,8 @@ class LangGraphTui:
 
         right_diag_height = max(5, int(main_height * 0.63))
         right_event_height = main_height - right_diag_height
+
+        self._panel_regions.clear()
 
         self._draw_panel(
             screen,
@@ -514,18 +570,37 @@ class LangGraphTui:
             lines=self._event_lines,
         )
 
+        prompt_lines = wrap_lines([self._input_buffer], width=max(1, width - 4))
+        visible_prompt = prompt_lines[-composer_rows:] if prompt_lines else [""]
+        padded_prompt = [""] * (composer_rows - len(visible_prompt)) + visible_prompt
+        if len(prompt_lines) > composer_rows and padded_prompt:
+            padded_prompt[0] = f"...{padded_prompt[0]}"
+
         focused = self._focused_panel()
         status = (
             f"{self._status_line} | app={self.application_id} | thread={self.thread_id or '-'} | "
             f"profile={self.profile_id or '-'} | service={self.base_url} | focus={focused}"
         )
-        screen.addnstr(height - 3, 0, status.ljust(width), width - 1)
-        prompt = f"> {self._input_buffer}"
-        screen.addnstr(height - 2, 0, prompt.ljust(width), width - 1)
+        status_row = main_height
+        screen.addnstr(status_row, 0, normalize_display_text(status).ljust(width), width - 1)
+
+        prompt_start_row = status_row + 1
+        for idx in range(composer_rows):
+            prefix = "> " if idx == 0 else "  "
+            prompt_line = f"{prefix}{padded_prompt[idx]}"
+            screen.addnstr(
+                prompt_start_row + idx,
+                0,
+                normalize_display_text(prompt_line).ljust(width),
+                width - 1,
+            )
+
         screen.addnstr(
             height - 1,
             0,
-            "Enter=send Tab=next Shift+Tab=prev Up/Down PgUp/PgDn Home/End=scroll /clear /quit".ljust(width),
+            normalize_display_text(
+                "Enter=send Ctrl+N=newline Tab=next Shift+Tab=prev MouseWheel=scroll Click=focus /clear /quit"
+            ).ljust(width),
             width - 1,
         )
         screen.refresh()
@@ -545,12 +620,15 @@ class LangGraphTui:
         if height < 3 or width < 8:
             return
 
+        self._panel_regions[panel_id] = (y, x, height, width)
         panel = screen.derwin(height, width, y, x)
         panel.box()
 
         inner_height = height - 2
         inner_width = width - 2
-        wrapped = wrap_lines(lines, inner_width)
+        scrollbar_enabled = inner_width >= 4
+        text_width = inner_width - 1 if scrollbar_enabled else inner_width
+        wrapped = wrap_lines(lines, text_width)
         visible, max_offset = viewport_slice(
             wrapped,
             inner_height=inner_height,
@@ -568,11 +646,32 @@ class LangGraphTui:
         panel.addnstr(0, 2, panel_title[: max(1, width - 4)], max(1, width - 4))
 
         for row, text in enumerate(visible[:inner_height], start=1):
-            safe_text = normalize_display_text(text)[:inner_width]
+            safe_text = normalize_display_text(text)[:text_width]
             try:
-                panel.addnstr(row, 1, safe_text.ljust(inner_width), inner_width)
+                panel.addnstr(row, 1, safe_text.ljust(text_width), text_width)
             except curses.error:
                 continue
+
+        if scrollbar_enabled:
+            track_x = width - 2
+            thumb_size = 1
+            thumb_top = inner_height - 1
+            if max_offset > 0:
+                thumb_size = max(1, int((inner_height * inner_height) / max(1, len(wrapped))))
+                thumb_size = min(thumb_size, inner_height)
+                normalized = offset / max_offset
+                thumb_top = int((inner_height - thumb_size) * (1 - normalized))
+
+            for row in range(inner_height):
+                try:
+                    panel.addch(row + 1, track_x, ord("|"))
+                except curses.error:
+                    continue
+            for row in range(thumb_size):
+                try:
+                    panel.addch(thumb_top + row + 1, track_x, ord("#"))
+                except curses.error:
+                    continue
 
 
 def build_parser() -> argparse.ArgumentParser:
