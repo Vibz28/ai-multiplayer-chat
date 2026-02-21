@@ -1,0 +1,133 @@
+:root {
+  color: #1d1f23;
+  background: radial-gradient(circle at top right, #f7f7f2, #e9eef5 55%, #d9e2ed);
+  font-family: 'IBM Plex Sans', 'Avenir Next', sans-serif;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+#root {
+  min-height: 100vh;
+}
+
+.app-shell {
+  box-sizing: border-box;
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(360px, 1fr));
+  padding: 1rem;
+}
+
+.panel {
+  background: #ffffffdc;
+  border: 1px solid #cfd6de;
+  border-radius: 12px;
+  box-shadow: 0 8px 24px #1f29371f;
+  padding: 1rem;
+}
+
+h1,
+h2 {
+  margin-top: 0;
+}
+
+.inline-form {
+  align-items: center;
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: 100px 1fr auto;
+  margin-bottom: 1rem;
+}
+
+.inline-form input {
+  border: 1px solid #b7bec8;
+  border-radius: 8px;
+  min-width: 0;
+  padding: 0.5rem;
+}
+
+.button-row {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+button {
+  background: #084c61;
+  border: 0;
+  border-radius: 8px;
+  color: #f4f7fb;
+  cursor: pointer;
+  padding: 0.5rem 0.8rem;
+}
+
+button:disabled {
+  background: #8f98a4;
+  cursor: not-allowed;
+}
+
+.meta-grid {
+  display: grid;
+  gap: 0.5rem;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  margin-bottom: 1rem;
+}
+
+.meta-grid div {
+  background: #f0f4f7;
+  border-radius: 8px;
+  display: grid;
+  gap: 0.3rem;
+  padding: 0.6rem;
+}
+
+.meta-grid span {
+  color: #445060;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+.meta-grid code {
+  color: #0b2336;
+}
+
+.event-log {
+  display: grid;
+  gap: 0.5rem;
+  max-height: 60vh;
+  overflow: auto;
+}
+
+.event-card {
+  background: #f8fafc;
+  border: 1px solid #d7dde5;
+  border-radius: 8px;
+  padding: 0.5rem;
+}
+
+.event-card header {
+  display: flex;
+  justify-content: space-between;
+}
+
+.event-card pre {
+  background: #0c1e2f;
+  border-radius: 6px;
+  color: #e7f2ff;
+  overflow: auto;
+  padding: 0.5rem;
+}
+
+.error-text {
+  color: #a11d33;
+  font-weight: 600;
+}
+
+@media (max-width: 720px) {
+  .inline-form {
+    grid-template-columns: 1fr;
+  }
+}
