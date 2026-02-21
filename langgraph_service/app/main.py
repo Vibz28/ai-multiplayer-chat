@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -404,70 +403,241 @@ async def _agent_event_stream(request: AgentRunRequest) -> AsyncIterator[bytes]:
     )
     yield f"{initial.model_dump_json()}\n".encode()
 
-    try:
-        answer_markdown, tool_messages, run = await _invoke_agent(
-            request,
-            run_id=run_id,
-            trace_id=trace_id,
-            started_at=started_at,
-        )
-    except HTTPException as exc:
-        error_message = str(exc.detail)
-        run_payload = _build_run_diagnostics(
+    if state.agent_graph is None:
+        message = "Agent graph not initialized"
+        run = _build_run_diagnostics(
             request=request,
             run_id=run_id,
             trace_id=trace_id,
             status="error",
             started_at=started_at,
             finished_at=datetime.now(UTC),
-            error=error_message,
+            error=message,
         )
-        if isinstance(exc.detail, dict):
-            error_message = str(exc.detail.get("message", error_message))
-            detail_run = exc.detail.get("run")
-            if isinstance(detail_run, dict):
-                run_payload = detail_run
-
         error_event = _build_event(
             event_type="error",
             stream_state="error",
             application_id=request.application_id,
             thread_id=request.thread_id,
-            payload={"message": error_message, "run": run_payload},
+            payload={"message": message, "run": run},
         )
         yield f"{error_event.model_dump_json()}\n".encode()
         return
 
-    reasoning_chunk_count = 0
-    for tool_message in tool_messages:
-        for reasoning_chunk in _chunk_text(tool_message):
-            reasoning_chunk_count += 1
-            reasoning_event = _build_event(
-                event_type="reasoning",
-                stream_state="reasoning",
-                application_id=request.application_id,
-                thread_id=request.thread_id,
-                payload={"delta": reasoning_chunk},
-            )
-            yield f"{reasoning_event.model_dump_json()}\n".encode()
-            await asyncio.sleep(0)
+    graph_payload = {
+        "messages": [{"role": "user", "content": request.message}],
+        "application_id": request.application_id,
+        "thread_id": request.thread_id,
+        "profile_id": request.profile_id,
+    }
+    graph_config = {
+        "configurable": {
+            "thread_id": request.thread_id,
+            "application_id": request.application_id,
+            "profile_id": request.profile_id,
+        }
+    }
 
+    assistant_messages: list[AIMessage] = []
+    tool_messages: list[str] = []
+    answer_parts: list[str] = []
+    reasoning_chunk_count = 0
     content_chunk_count = 0
-    for content_chunk in _chunk_text(answer_markdown):
-        content_chunk_count += 1
-        content_event = _build_event(
-            event_type="content",
-            stream_state="generating",
+
+    try:
+        async for stream_event in state.agent_graph.astream_events(
+            graph_payload,
+            config=graph_config,
+            version="v2",
+        ):
+            event_name = str(stream_event.get("event", ""))
+            payload = stream_event.get("data", {})
+            if not isinstance(payload, dict):
+                continue
+
+            if event_name == "on_tool_end":
+                raw_output = payload.get("output")
+                reasoning_text = coerce_message_content(getattr(raw_output, "content", raw_output))
+                if not reasoning_text:
+                    continue
+                tool_messages.append(reasoning_text)
+                for reasoning_chunk in _chunk_text(reasoning_text):
+                    reasoning_chunk_count += 1
+                    reasoning_event = _build_event(
+                        event_type="reasoning",
+                        stream_state="reasoning",
+                        application_id=request.application_id,
+                        thread_id=request.thread_id,
+                        payload={"delta": reasoning_chunk},
+                    )
+                    yield f"{reasoning_event.model_dump_json()}\n".encode()
+                continue
+
+            if event_name == "on_chat_model_stream":
+                chunk = payload.get("chunk")
+                if chunk is None:
+                    continue
+                delta = coerce_message_content(getattr(chunk, "content", chunk))
+                if not delta:
+                    continue
+                answer_parts.append(delta)
+                content_chunk_count += 1
+                content_event = _build_event(
+                    event_type="content",
+                    stream_state="generating",
+                    application_id=request.application_id,
+                    thread_id=request.thread_id,
+                    payload={"delta": delta},
+                )
+                yield f"{content_event.model_dump_json()}\n".encode()
+                continue
+
+            if event_name == "on_chat_model_end":
+                output = payload.get("output")
+                if isinstance(output, AIMessage):
+                    assistant_messages.append(output)
+                elif isinstance(output, dict):
+                    candidate = output.get("message") or output.get("output")
+                    if isinstance(candidate, AIMessage):
+                        assistant_messages.append(candidate)
+    except Exception as exc:
+        message = f"Agent stream failed: {exc}"
+        run = _build_run_diagnostics(
+            request=request,
+            run_id=run_id,
+            trace_id=trace_id,
+            status="error",
+            started_at=started_at,
+            finished_at=datetime.now(UTC),
+            assistant_message_count=len(assistant_messages),
+            tool_message_count=len(tool_messages),
+            reasoning_chunk_count=reasoning_chunk_count,
+            content_chunk_count=content_chunk_count,
+            output_characters=len("".join(answer_parts)),
+            output_preview="".join(answer_parts),
+            error=message,
+        )
+        error_event = _build_event(
+            event_type="error",
+            stream_state="error",
             application_id=request.application_id,
             thread_id=request.thread_id,
-            payload={"delta": content_chunk},
+            payload={"message": message, "run": run},
         )
-        yield f"{content_event.model_dump_json()}\n".encode()
-        await asyncio.sleep(0)
+        yield f"{error_event.model_dump_json()}\n".encode()
+        return
 
-    run["reasoning_chunk_count"] = reasoning_chunk_count
-    run["content_chunk_count"] = content_chunk_count
-    run["output_characters"] = len(answer_markdown)
+    answer_markdown = "".join(answer_parts)
+
+    if not answer_markdown and assistant_messages:
+        answer_markdown = coerce_message_content(assistant_messages[-1].content)
+        if answer_markdown:
+            content_chunk_count += 1
+            content_event = _build_event(
+                event_type="content",
+                stream_state="generating",
+                application_id=request.application_id,
+                thread_id=request.thread_id,
+                payload={"delta": answer_markdown},
+            )
+            yield f"{content_event.model_dump_json()}\n".encode()
+
+    if not assistant_messages and not answer_markdown:
+        try:
+            fallback_answer, fallback_tool_messages, fallback_run = await _invoke_agent(
+                request,
+                run_id=run_id,
+                trace_id=trace_id,
+                started_at=started_at,
+            )
+        except HTTPException as exc:
+            error_message = str(exc.detail)
+            fallback_error_run = _build_run_diagnostics(
+                request=request,
+                run_id=run_id,
+                trace_id=trace_id,
+                status="error",
+                started_at=started_at,
+                finished_at=datetime.now(UTC),
+                error=error_message,
+            )
+            if isinstance(exc.detail, dict):
+                error_message = str(exc.detail.get("message", error_message))
+                detail_run = exc.detail.get("run")
+                if isinstance(detail_run, dict):
+                    fallback_error_run = detail_run
+
+            error_event = _build_event(
+                event_type="error",
+                stream_state="error",
+                application_id=request.application_id,
+                thread_id=request.thread_id,
+                payload={"message": error_message, "run": fallback_error_run},
+            )
+            yield f"{error_event.model_dump_json()}\n".encode()
+            return
+
+        for tool_message in fallback_tool_messages:
+            for reasoning_chunk in _chunk_text(tool_message):
+                reasoning_chunk_count += 1
+                reasoning_event = _build_event(
+                    event_type="reasoning",
+                    stream_state="reasoning",
+                    application_id=request.application_id,
+                    thread_id=request.thread_id,
+                    payload={"delta": reasoning_chunk},
+                )
+                yield f"{reasoning_event.model_dump_json()}\n".encode()
+
+        if fallback_answer:
+            for content_chunk in _chunk_text(fallback_answer):
+                content_chunk_count += 1
+                content_event = _build_event(
+                    event_type="content",
+                    stream_state="generating",
+                    application_id=request.application_id,
+                    thread_id=request.thread_id,
+                    payload={"delta": content_chunk},
+                )
+                yield f"{content_event.model_dump_json()}\n".encode()
+
+        fallback_run["reasoning_chunk_count"] = reasoning_chunk_count
+        fallback_run["content_chunk_count"] = content_chunk_count
+        fallback_run["output_characters"] = len(fallback_answer)
+
+        completion = _build_event(
+            event_type="complete",
+            stream_state="completed",
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            payload={"message": "completed", "run": fallback_run},
+        )
+        yield f"{completion.model_dump_json()}\n".encode()
+        return
+
+    selected_model = None
+    for assistant_message in reversed(assistant_messages):
+        selected_model = _extract_model_name(assistant_message)
+        if selected_model:
+            break
+
+    run = _build_run_diagnostics(
+        request=request,
+        run_id=run_id,
+        trace_id=trace_id,
+        status="completed",
+        started_at=started_at,
+        finished_at=datetime.now(UTC),
+        model_selected=selected_model,
+        token_usage=_extract_token_usage(assistant_messages),
+        tool_calls=_extract_tool_calls(assistant_messages),
+        assistant_message_count=len(assistant_messages),
+        tool_message_count=len(tool_messages),
+        reasoning_chunk_count=reasoning_chunk_count,
+        content_chunk_count=content_chunk_count,
+        output_characters=len(answer_markdown),
+        output_preview=answer_markdown,
+    )
 
     completion = _build_event(
         event_type="complete",
@@ -477,6 +647,9 @@ async def _agent_event_stream(request: AgentRunRequest) -> AsyncIterator[bytes]:
         payload={"message": "completed", "run": run},
     )
     yield f"{completion.model_dump_json()}\n".encode()
+
+    return
+
 
 
 @app.get("/health", response_model=HealthResponse)

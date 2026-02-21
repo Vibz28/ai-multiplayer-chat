@@ -491,14 +491,22 @@ class LangGraphTui:
         if self._active_reasoning:
             label = self._active_run_id or "run-live"
             lines.append(f"[live {label}] {self._active_reasoning}")
-        return lines or ["(waiting)"]
+        if lines:
+            return lines
+        if self._streaming:
+            return ["(waiting for reasoning/tool events)"]
+        return ["(no reasoning emitted by model/tools)"]
 
     def _output_panel_lines(self) -> list[str]:
         lines = list(self._output_history_lines)
         if self._active_output:
             label = self._active_run_id or "run-live"
             lines.append(f"[live {label}] {self._active_output}")
-        return lines or ["(waiting)"]
+        if lines:
+            return lines
+        if self._streaming:
+            return ["(waiting for content stream)"]
+        return ["(no output yet)"]
 
     def _render(self, screen) -> None:
         screen.erase()

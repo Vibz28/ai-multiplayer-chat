@@ -90,11 +90,46 @@ class SuccessfulGraph:
             ]
         }
 
+    async def astream_events(self, _payload: dict, config: dict, version: str):
+        del config, version
+        yield {"event": "on_chat_model_stream", "data": {"chunk": AIMessage(content="final ")}}
+        yield {"event": "on_chat_model_stream", "data": {"chunk": AIMessage(content="answer")}}
+        yield {
+            "event": "on_tool_end",
+            "data": {"output": ToolMessage(content="tool output", tool_call_id="tool-1")},
+        }
+        yield {
+            "event": "on_chat_model_end",
+            "data": {
+                "output": AIMessage(
+                    content="final answer",
+                    response_metadata={
+                        "model": "kimi-k2.5:cloud",
+                        "prompt_eval_count": 8,
+                        "eval_count": 6,
+                    },
+                    tool_calls=[
+                        {
+                            "id": "tool-call-1",
+                            "name": "describe_session_context",
+                            "type": "tool_call",
+                            "args": {"application_id": "app-stream"},
+                        }
+                    ],
+                )
+            },
+        }
+
 
 class FailingGraph:
     async def ainvoke(self, _payload: dict, config: dict) -> dict:
         del config
         raise RuntimeError("upstream unavailable")
+
+    async def astream_events(self, _payload: dict, config: dict, version: str):
+        del config, version
+        raise RuntimeError("upstream unavailable")
+        yield {}  # pragma: no cover
 
 
 async def collect_events(request: AgentRunRequest) -> list[dict]:
@@ -160,6 +195,6 @@ async def test_agent_stream_emits_error_event_on_failure() -> None:
 
     assert [event["type"] for event in events] == ["status", "error"]
     assert events[1]["stream_state"] == "error"
-    assert "Agent invocation failed" in events[1]["payload"]["message"]
+    assert "Agent stream failed" in events[1]["payload"]["message"]
     assert events[1]["payload"]["run"]["status"] == "error"
     assert events[1]["payload"]["run"]["error"] is not None

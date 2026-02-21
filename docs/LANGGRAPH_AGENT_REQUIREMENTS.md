@@ -50,6 +50,12 @@ Event types emitted by `POST /agent/stream`:
 - `complete`
 - `error`
 
+Streaming behavior details:
+
+- `content` events are emitted from live `on_chat_model_stream` token chunks (incremental, not post-hoc chunking).
+- `reasoning` events are emitted from tool outputs (`on_tool_end`) when the agent actually invokes tools.
+- If a run completes without tool invocations, reasoning panes should remain empty by design (`tool_message_count=0`).
+
 Each stream event may include `payload.run` diagnostics with LangSmith-style fields:
 
 - run identity: `run_id`, `trace_id`, `name`, `run_type`, `status`
