@@ -52,3 +52,5 @@ The TUI supports:
 - live reasoning and content streaming
 - run diagnostics panel with LangSmith-style metadata (run IDs, model selection, token usage, latency, tool calls)
 - persistent JSONL run/event logging (`logs/langgraph_tui_events.jsonl` by default)
+- multi-turn continuity with preserved reasoning/output history across runs
+- per-panel scrolling (`Tab`, `Shift+Tab`, `Up/Down`, `PgUp/PgDn`, `Home/End`)

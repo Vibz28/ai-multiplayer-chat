@@ -64,6 +64,29 @@ def format_run_diagnostics(run: dict[str, Any]) -> list[str]:
     return lines
 
 
+def wrap_lines(lines: list[str], width: int) -> list[str]:
+    wrapped: list[str] = []
+    for line in lines:
+        chunks = textwrap.wrap(
+            line,
+            width=max(1, width),
+            replace_whitespace=False,
+            drop_whitespace=False,
+        ) or [""]
+        wrapped.extend(chunks)
+    return wrapped
+
+
+def viewport_slice(lines: list[str], inner_height: int, offset: int) -> tuple[list[str], int]:
+    if inner_height <= 0:
+        return [], 0
+    max_offset = max(0, len(lines) - inner_height)
+    clamped_offset = min(max(0, offset), max_offset)
+    end = len(lines) - clamped_offset
+    start = max(0, end - inner_height)
+    return lines[start:end], max_offset
+
+
 def ensure_thread(base_url: str, application_id: str) -> str:
     with httpx.Client(timeout=20.0) as client:
         response = client.post(
@@ -106,6 +129,12 @@ def stream_agent_events(
 
 
 class LangGraphTui:
+    PANEL_TRANSCRIPT = "transcript"
+    PANEL_REASONING = "reasoning"
+    PANEL_OUTPUT = "output"
+    PANEL_DIAGNOSTICS = "diagnostics"
+    PANEL_EVENTS = "events"
+
     def __init__(
         self,
         *,
@@ -131,10 +160,29 @@ class LangGraphTui:
         self._status_line = "Type a prompt and press Enter. Use /quit to exit."
 
         self._transcript_lines: list[str] = []
-        self._reasoning_text = ""
-        self._output_text = ""
+        self._reasoning_history_lines: list[str] = []
+        self._output_history_lines: list[str] = []
+        self._active_reasoning = ""
+        self._active_output = ""
+        self._active_run_id: str | None = None
+
         self._diagnostic_lines: list[str] = []
         self._event_lines: list[str] = []
+
+        self._panel_order = [
+            self.PANEL_TRANSCRIPT,
+            self.PANEL_REASONING,
+            self.PANEL_OUTPUT,
+            self.PANEL_DIAGNOSTICS,
+            self.PANEL_EVENTS,
+        ]
+        self._panel_focus_index = 0
+        self._scroll_offsets = {panel: 0 for panel in self._panel_order}
+        self._panel_max_offsets = {panel: 0 for panel in self._panel_order}
+        self._panel_page_sizes = {panel: 10 for panel in self._panel_order}
+
+        # Prevent a large burst of events from being consumed in one frame.
+        self._max_events_per_tick = 32
 
     def run(self) -> None:
         curses.wrapper(self._main)
@@ -150,6 +198,25 @@ class LangGraphTui:
             self._read_key(screen)
             time.sleep(0.03)
 
+    def _focused_panel(self) -> str:
+        return self._panel_order[self._panel_focus_index]
+
+    def _cycle_focus(self, step: int) -> None:
+        self._panel_focus_index = (self._panel_focus_index + step) % len(self._panel_order)
+
+    def _scroll_focused(self, delta: int) -> None:
+        panel = self._focused_panel()
+        max_offset = self._panel_max_offsets.get(panel, 0)
+        new_offset = self._scroll_offsets.get(panel, 0) + delta
+        self._scroll_offsets[panel] = min(max(new_offset, 0), max_offset)
+
+    def _jump_scroll(self, to_top: bool) -> None:
+        panel = self._focused_panel()
+        if to_top:
+            self._scroll_offsets[panel] = self._panel_max_offsets.get(panel, 0)
+        else:
+            self._scroll_offsets[panel] = 0
+
     def _read_key(self, screen) -> None:
         key = screen.getch()
         if key == -1:
@@ -157,6 +224,38 @@ class LangGraphTui:
 
         if key in (3,):  # Ctrl+C
             self._running = False
+            return
+
+        if key == 9:  # Tab
+            self._cycle_focus(1)
+            return
+
+        if key == curses.KEY_BTAB:  # Shift+Tab
+            self._cycle_focus(-1)
+            return
+
+        if key == curses.KEY_UP:
+            self._scroll_focused(1)
+            return
+
+        if key == curses.KEY_DOWN:
+            self._scroll_focused(-1)
+            return
+
+        if key == curses.KEY_PPAGE:
+            self._scroll_focused(self._panel_page_sizes.get(self._focused_panel(), 10))
+            return
+
+        if key == curses.KEY_NPAGE:
+            self._scroll_focused(-self._panel_page_sizes.get(self._focused_panel(), 10))
+            return
+
+        if key == curses.KEY_HOME:
+            self._jump_scroll(to_top=True)
+            return
+
+        if key == curses.KEY_END:
+            self._jump_scroll(to_top=False)
             return
 
         if key in (10, 13):  # Enter
@@ -169,11 +268,16 @@ class LangGraphTui:
                 return
             if value == "/clear":
                 self._transcript_lines.clear()
-                self._reasoning_text = ""
-                self._output_text = ""
+                self._reasoning_history_lines.clear()
+                self._output_history_lines.clear()
+                self._active_reasoning = ""
+                self._active_output = ""
+                self._active_run_id = None
                 self._diagnostic_lines.clear()
                 self._event_lines.clear()
                 self._status_line = "Cleared panes."
+                for panel in self._panel_order:
+                    self._scroll_offsets[panel] = 0
                 return
             if self._streaming:
                 self._status_line = "A run is already in progress. Wait for completion."
@@ -190,11 +294,14 @@ class LangGraphTui:
 
     def _start_stream(self, message: str) -> None:
         self._streaming = True
-        self._reasoning_text = ""
-        self._output_text = ""
+        self._active_reasoning = ""
+        self._active_output = ""
+        self._active_run_id = None
         self._status_line = "Streaming..."
         self._transcript_lines.append(f"[user] {message}")
         self._append_event("local", "queued", "user prompt submitted")
+        self._scroll_offsets[self.PANEL_REASONING] = 0
+        self._scroll_offsets[self.PANEL_OUTPUT] = 0
 
         self._stream_thread = Thread(
             target=self._stream_worker,
@@ -232,12 +339,28 @@ class LangGraphTui:
             )
 
     def _drain_event_queue(self) -> None:
-        while True:
+        for _ in range(self._max_events_per_tick):
             try:
                 event = self._event_queue.get_nowait()
             except Empty:
                 return
             self._handle_event(event)
+
+    def _finalize_active_buffers(self, *, add_to_transcript: bool) -> None:
+        timestamp = datetime.now(UTC).strftime("%H:%M:%S")
+        run_label = self._active_run_id or "run-unknown"
+
+        if self._active_reasoning.strip():
+            self._reasoning_history_lines.append(
+                f"[{timestamp}] [{run_label}] {self._active_reasoning}"
+            )
+        if self._active_output.strip():
+            self._output_history_lines.append(f"[{timestamp}] [{run_label}] {self._active_output}")
+            if add_to_transcript:
+                self._transcript_lines.append(f"[assistant] {self._active_output}")
+
+        self._active_reasoning = ""
+        self._active_output = ""
 
     def _handle_event(self, event: dict[str, Any]) -> None:
         event_type = str(event.get("type", "status"))
@@ -250,31 +373,35 @@ class LangGraphTui:
         message = payload.get("message")
         run = payload.get("run")
 
-        if event_type == "reasoning" and isinstance(delta, str):
-            self._reasoning_text += delta
-        elif event_type == "content" and isinstance(delta, str):
-            self._output_text += delta
-        elif event_type == "complete":
-            self._streaming = False
-            self._status_line = "Completed."
-            if self._output_text:
-                self._transcript_lines.append(f"[assistant] {self._output_text}")
-            self._reasoning_text = ""
-            self._output_text = ""
-        elif event_type == "error":
-            self._streaming = False
-            self._status_line = "Error."
-            self._transcript_lines.append(f"[error] {payload.get('message', 'unknown error')}")
-
-        event_message = str(message or delta or "")
-        self._append_event(event_type, stream_state, event_message[:120])
-
         if isinstance(run, dict):
+            run_id = run.get("run_id")
+            if isinstance(run_id, str) and run_id:
+                self._active_run_id = run_id
+
             timestamp = datetime.now(UTC).isoformat()
             self._diagnostic_lines.append(f"[{timestamp}] run diagnostics")
             self._diagnostic_lines.extend(format_run_diagnostics(run))
             self._diagnostic_lines.append("-" * 16)
             self._write_log({"kind": "run", "captured_at": timestamp, "run": run})
+            if self._scroll_offsets[self.PANEL_DIAGNOSTICS] == 0:
+                self._scroll_offsets[self.PANEL_DIAGNOSTICS] = 0
+
+        if event_type == "reasoning" and isinstance(delta, str):
+            self._active_reasoning += delta
+        elif event_type == "content" and isinstance(delta, str):
+            self._active_output += delta
+        elif event_type == "complete":
+            self._streaming = False
+            self._status_line = "Completed."
+            self._finalize_active_buffers(add_to_transcript=True)
+        elif event_type == "error":
+            self._streaming = False
+            self._status_line = "Error."
+            self._finalize_active_buffers(add_to_transcript=False)
+            self._transcript_lines.append(f"[error] {payload.get('message', 'unknown error')}")
+
+        event_message = str(message or delta or "")
+        self._append_event(event_type, stream_state, event_message[:120])
 
         self._write_log(
             {
@@ -291,6 +418,20 @@ class LangGraphTui:
     def _write_log(self, payload: dict[str, Any]) -> None:
         with self.log_file.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(payload, ensure_ascii=True) + "\n")
+
+    def _reasoning_panel_lines(self) -> list[str]:
+        lines = list(self._reasoning_history_lines)
+        if self._active_reasoning:
+            label = self._active_run_id or "run-live"
+            lines.append(f"[live {label}] {self._active_reasoning}")
+        return lines or ["(waiting)"]
+
+    def _output_panel_lines(self) -> list[str]:
+        lines = list(self._output_history_lines)
+        if self._active_output:
+            label = self._active_run_id or "run-live"
+            lines.append(f"[live {label}] {self._active_output}")
+        return lines or ["(waiting)"]
 
     def _render(self, screen) -> None:
         screen.erase()
@@ -310,63 +451,76 @@ class LangGraphTui:
 
         self._draw_panel(
             screen,
-            0,
-            0,
-            left_transcript_height,
-            left_width,
-            "Transcript",
-            self._transcript_lines,
+            panel_id=self.PANEL_TRANSCRIPT,
+            y=0,
+            x=0,
+            height=left_transcript_height,
+            width=left_width,
+            title="Transcript",
+            lines=self._transcript_lines,
         )
         self._draw_panel(
             screen,
-            left_transcript_height,
-            0,
-            left_reasoning_height,
-            left_width,
-            "Reasoning Stream",
-            [self._reasoning_text] if self._reasoning_text else ["(waiting)"],
+            panel_id=self.PANEL_REASONING,
+            y=left_transcript_height,
+            x=0,
+            height=left_reasoning_height,
+            width=left_width,
+            title="Reasoning Stream",
+            lines=self._reasoning_panel_lines(),
         )
         self._draw_panel(
             screen,
-            left_transcript_height + left_reasoning_height,
-            0,
-            left_output_height,
-            left_width,
-            "Output Stream",
-            [self._output_text] if self._output_text else ["(waiting)"],
+            panel_id=self.PANEL_OUTPUT,
+            y=left_transcript_height + left_reasoning_height,
+            x=0,
+            height=left_output_height,
+            width=left_width,
+            title="Output Stream",
+            lines=self._output_panel_lines(),
         )
         self._draw_panel(
             screen,
-            0,
-            left_width,
-            right_diag_height,
-            right_width,
-            "LangSmith-Style Diagnostics",
-            self._diagnostic_lines,
+            panel_id=self.PANEL_DIAGNOSTICS,
+            y=0,
+            x=left_width,
+            height=right_diag_height,
+            width=right_width,
+            title="LangSmith-Style Diagnostics",
+            lines=self._diagnostic_lines,
         )
         self._draw_panel(
             screen,
-            right_diag_height,
-            left_width,
-            right_event_height,
-            right_width,
-            "Event Log",
-            self._event_lines,
+            panel_id=self.PANEL_EVENTS,
+            y=right_diag_height,
+            x=left_width,
+            height=right_event_height,
+            width=right_width,
+            title="Event Log",
+            lines=self._event_lines,
         )
 
+        focused = self._focused_panel()
         status = (
             f"{self._status_line} | app={self.application_id} | thread={self.thread_id or '-'} | "
-            f"profile={self.profile_id or '-'} | service={self.base_url}"
+            f"profile={self.profile_id or '-'} | service={self.base_url} | focus={focused}"
         )
         screen.addnstr(height - 3, 0, status.ljust(width), width - 1)
         prompt = f"> {self._input_buffer}"
         screen.addnstr(height - 2, 0, prompt.ljust(width), width - 1)
-        screen.addnstr(height - 1, 0, "Enter=send  /clear=reset panes  /quit=exit".ljust(width), width - 1)
+        screen.addnstr(
+            height - 1,
+            0,
+            "Enter=send Tab=next Shift+Tab=prev Up/Down PgUp/PgDn Home/End=scroll /clear /quit".ljust(width),
+            width - 1,
+        )
         screen.refresh()
 
-    @staticmethod
     def _draw_panel(
+        self,
         screen,
+        *,
+        panel_id: str,
         y: int,
         x: int,
         height: int,
@@ -379,16 +533,25 @@ class LangGraphTui:
 
         panel = screen.derwin(height, width, y, x)
         panel.box()
-        panel.addnstr(0, 2, f" {title} ", max(1, width - 4))
 
         inner_height = height - 2
         inner_width = width - 2
-        wrapped: list[str] = []
-        for line in lines:
-            chunks = textwrap.wrap(line, width=max(1, inner_width)) or [""]
-            wrapped.extend(chunks)
+        wrapped = wrap_lines(lines, inner_width)
+        visible, max_offset = viewport_slice(
+            wrapped,
+            inner_height=inner_height,
+            offset=self._scroll_offsets.get(panel_id, 0),
+        )
 
-        visible = wrapped[-inner_height:]
+        self._panel_max_offsets[panel_id] = max_offset
+        self._panel_page_sizes[panel_id] = max(1, inner_height - 1)
+        self._scroll_offsets[panel_id] = min(self._scroll_offsets.get(panel_id, 0), max_offset)
+
+        focus_marker = "*" if panel_id == self._focused_panel() else " "
+        offset = self._scroll_offsets.get(panel_id, 0)
+        title_suffix = f" {offset}/{max_offset}" if max_offset > 0 else ""
+        panel.addnstr(0, 2, f"{focus_marker}{title}{title_suffix}", max(1, width - 4))
+
         for row, text in enumerate(visible, start=1):
             panel.addnstr(row, 1, text.ljust(inner_width), inner_width)
 

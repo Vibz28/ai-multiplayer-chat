@@ -14,7 +14,10 @@ tui_module = module_from_spec(tui_spec)
 tui_spec.loader.exec_module(tui_module)
 
 format_run_diagnostics = tui_module.format_run_diagnostics
+LangGraphTui = tui_module.LangGraphTui
 parse_stream_line = tui_module.parse_stream_line
+viewport_slice = tui_module.viewport_slice
+wrap_lines = tui_module.wrap_lines
 
 
 def test_parse_stream_line_rejects_non_object_payload() -> None:
@@ -62,3 +65,64 @@ def test_format_run_diagnostics_exposes_langsmith_style_fields() -> None:
     assert any("trace_id: trace-123" in line for line in diagnostics)
     assert any("tokens: prompt=12, completion=18, total=30" in line for line in diagnostics)
     assert any("tools_called (1): describe_session_context" in line for line in diagnostics)
+
+
+def test_wrap_lines_and_viewport_slice_support_scrollback() -> None:
+    wrapped = wrap_lines(
+        [
+            "alpha",
+            "beta gamma delta epsilon",
+            "zeta",
+        ],
+        width=8,
+    )
+
+    latest, max_offset = viewport_slice(wrapped, inner_height=3, offset=0)
+    older, _ = viewport_slice(wrapped, inner_height=3, offset=max_offset)
+
+    assert max_offset >= 1
+    assert latest[-1].strip() == "zeta"
+    assert older[0].strip().startswith("alpha")
+
+
+def test_tui_preserves_stream_output_after_completion(tmp_path) -> None:
+    app = LangGraphTui(
+        base_url="http://localhost:8080",
+        application_id="cli-test",
+        profile_id="cli-user",
+        thread_id="thread-test",
+        log_file=tmp_path / "events.jsonl",
+    )
+    app._streaming = True
+
+    running_run = {"run_id": "run-1", "status": "running"}
+    complete_run = {"run_id": "run-1", "status": "completed"}
+
+    app._handle_event(
+        {
+            "type": "status",
+            "stream_state": "queued",
+            "payload": {"message": "started", "run": running_run},
+        }
+    )
+    app._handle_event(
+        {
+            "type": "content",
+            "stream_state": "generating",
+            "payload": {"delta": "hello world"},
+        }
+    )
+    assert "hello world" in app._output_panel_lines()[-1]
+
+    app._handle_event(
+        {
+            "type": "complete",
+            "stream_state": "completed",
+            "payload": {"message": "completed", "run": complete_run},
+        }
+    )
+
+    assert app._streaming is False
+    assert app._active_output == ""
+    assert any("hello world" in line for line in app._output_history_lines)
+    assert any("hello world" in line for line in app._transcript_lines)
