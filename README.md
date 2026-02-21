@@ -28,5 +28,14 @@ Work is delivered in phased feature branches and merged to `main` after validati
 
 - Repository initialized
 - Bootstrap planning docs created
-- Architecture decisions pending explicit user sign-off
+- Architecture decisions approved:
+  - Backend: FastAPI
+  - Frontend: React + TypeScript + Vite (Bun-managed)
+  - LangGraph service: real HTTP integration path with hybrid graph + autonomous tool calls
+  - Ollama model policy: `kimi-k2.5:cloud` -> `qwen3-vl:235b-cloud` -> `gpt-oss:20b`
 
+## Key Docs
+
+- `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/docs/PHASE_PLAN.md`
+- `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/docs/ARCHITECTURE_DECISIONS.md`
+- `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/docs/LANGGRAPH_AGENT_REQUIREMENTS.md`
