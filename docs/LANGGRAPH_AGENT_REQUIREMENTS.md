@@ -34,6 +34,21 @@ The LangGraph service uses a hybrid model:
 - Persistent thread registration via Postgres
 - Runtime heartbeat/session side-channel via Redis
 
+## Streaming Contract
+
+`langgraph_service` exposes:
+
+- `POST /agent/runs`: single-shot response
+- `POST /agent/stream`: NDJSON event stream for backend relay
+
+Event types emitted by `POST /agent/stream`:
+
+- `status`
+- `reasoning`
+- `content`
+- `complete`
+- `error`
+
 Agent entrypoint:
 
 - `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/langgraph_service/app/agent.py`

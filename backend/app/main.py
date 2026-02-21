@@ -123,6 +123,7 @@ async def websocket_chat(
     websocket: WebSocket,
     service: SessionService = Depends(get_session_service),
     hub: WebSocketHub = Depends(get_websocket_hub),
+    langgraph_client=Depends(get_langgraph_client),
 ) -> None:
     existing = await service.get_session(application_id)
     if existing is None:
@@ -158,6 +159,10 @@ async def websocket_chat(
                 continue
 
             if inbound.type == "ping":
+                try:
+                    snapshot = await langgraph_client.status_snapshot()
+                except LangGraphClientError:
+                    snapshot = {"status": "unreachable"}
                 await hub.emit(
                     application_id,
                     normalize_event(
@@ -165,7 +170,7 @@ async def websocket_chat(
                         application_id=application_id,
                         thread_id=existing.langgraph_thread_id,
                         stream_state="idle",
-                        payload={"message": "pong"},
+                        payload={"message": "pong", "snapshot": snapshot},
                     ),
                 )
                 continue
@@ -204,42 +209,63 @@ async def websocket_chat(
                     payload={"message": "queued"},
                 ),
             )
-            await hub.emit(
-                application_id,
-                normalize_event(
-                    event_type="reasoning",
+            try:
+                preflight = await langgraph_client.status_snapshot()
+                await hub.emit(
+                    application_id,
+                    normalize_event(
+                        event_type="status",
+                        application_id=application_id,
+                        thread_id=mapping.langgraph_thread_id,
+                        stream_state="generating",
+                        payload={"message": "langgraph_preflight", "snapshot": preflight},
+                    ),
+                )
+            except LangGraphClientError:
+                await hub.emit(
+                    application_id,
+                    normalize_event(
+                        event_type="status",
+                        application_id=application_id,
+                        thread_id=mapping.langgraph_thread_id,
+                        stream_state="generating",
+                        payload={"message": "langgraph_preflight_failed"},
+                    ),
+                )
+
+            try:
+                async for upstream_event in langgraph_client.stream_agent_run(
                     application_id=application_id,
                     thread_id=mapping.langgraph_thread_id,
-                    stream_state="reasoning",
-                    payload={
-                        "delta": "Phase 1 placeholder reasoning path acknowledged request and reserved event channels."
-                    },
-                ),
-            )
-            await hub.emit(
-                application_id,
-                normalize_event(
-                    event_type="content",
-                    application_id=application_id,
-                    thread_id=mapping.langgraph_thread_id,
-                    stream_state="generating",
-                    payload={
-                        "delta": (
-                            "Phase 1 foundation response: backend routing, session mapping, "
-                            "and thread continuity plumbing are active."
-                        )
-                    },
-                ),
-            )
-            await hub.emit(
-                application_id,
-                normalize_event(
-                    event_type="complete",
-                    application_id=application_id,
-                    thread_id=mapping.langgraph_thread_id,
-                    stream_state="completed",
-                    payload={"message": "completed"},
-                ),
-            )
+                    profile_id=existing.profile_id,
+                    message=inbound.content,
+                ):
+                    upstream_type = str(upstream_event.get("type", "status"))
+                    upstream_state = str(upstream_event.get("stream_state", "generating"))
+                    upstream_payload = upstream_event.get("payload", {})
+                    if not isinstance(upstream_payload, dict):
+                        upstream_payload = {"value": upstream_payload}
+                    await hub.emit(
+                        application_id,
+                        normalize_event(
+                            event_type=upstream_type,
+                            application_id=application_id,
+                            thread_id=mapping.langgraph_thread_id,
+                            stream_state=upstream_state,
+                            payload=upstream_payload,
+                        ),
+                    )
+            except LangGraphClientError as exc:
+                await hub.emit(
+                    application_id,
+                    normalize_event(
+                        event_type="error",
+                        application_id=application_id,
+                        thread_id=mapping.langgraph_thread_id,
+                        stream_state="error",
+                        payload={"message": str(exc)},
+                    ),
+                )
+                continue
     except WebSocketDisconnect:
         await hub.disconnect(application_id, websocket)

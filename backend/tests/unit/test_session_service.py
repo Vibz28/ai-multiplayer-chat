@@ -16,6 +16,17 @@ class InMemoryLangGraphClient:
     async def status_snapshot(self) -> dict[str, str]:
         return {"status": "ok"}
 
+    async def stream_agent_run(
+        self,
+        *,
+        application_id: str,
+        thread_id: str,
+        profile_id: str | None,
+        message: str,
+    ):
+        if False:
+            yield {}
+
 
 async def test_session_service_resolves_thread_once() -> None:
     repository = InMemoryMappingRepository()

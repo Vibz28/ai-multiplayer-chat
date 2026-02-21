@@ -34,6 +34,30 @@ class InMemoryLangGraphClient:
     async def status_snapshot(self) -> dict[str, str]:
         return {"status": "ok"}
 
+    async def stream_agent_run(
+        self,
+        *,
+        application_id: str,
+        thread_id: str,
+        profile_id: str | None,
+        message: str,
+    ):
+        yield {
+            "type": "reasoning",
+            "stream_state": "reasoning",
+            "payload": {"delta": f"reasoning for {message}"},
+        }
+        yield {
+            "type": "content",
+            "stream_state": "generating",
+            "payload": {"delta": f"content for {message}"},
+        }
+        yield {
+            "type": "complete",
+            "stream_state": "completed",
+            "payload": {"message": "completed"},
+        }
+
 
 def build_test_client() -> TestClient:
     repository = InMemoryMappingRepository()
@@ -92,11 +116,14 @@ def test_websocket_event_channels_are_distinct() -> None:
             websocket.send_json({"type": "user_message", "content": "hello"})
 
             status_event = websocket.receive_json()
+            preflight_event = websocket.receive_json()
             reasoning_event = websocket.receive_json()
             content_event = websocket.receive_json()
             complete_event = websocket.receive_json()
 
             assert status_event["type"] == "status"
+            assert preflight_event["type"] == "status"
+            assert preflight_event["payload"]["message"] == "langgraph_preflight"
             assert reasoning_event["type"] == "reasoning"
             assert content_event["type"] == "content"
             assert complete_event["type"] == "complete"
