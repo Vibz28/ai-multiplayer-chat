@@ -15,6 +15,9 @@ tui_spec.loader.exec_module(tui_module)
 
 format_run_diagnostics = tui_module.format_run_diagnostics
 LangGraphTui = tui_module.LangGraphTui
+decode_alt_sequence = tui_module.decode_alt_sequence
+move_cursor_word_left = tui_module.move_cursor_word_left
+move_cursor_word_right = tui_module.move_cursor_word_right
 normalize_display_text = tui_module.normalize_display_text
 parse_stream_line = tui_module.parse_stream_line
 viewport_slice = tui_module.viewport_slice
@@ -96,6 +99,38 @@ def test_wrap_lines_sanitizes_multiline_and_control_chars() -> None:
 def test_normalize_display_text_ascii_sanitization() -> None:
     normalized = normalize_display_text("hello\tworld\nsnowman=\u2603")
     assert normalized == "hello world snowman=?"
+
+
+def test_decode_alt_sequence_for_word_navigation() -> None:
+    assert decode_alt_sequence([ord("b")]) == "word_left"
+    assert decode_alt_sequence([ord("f")]) == "word_right"
+    assert decode_alt_sequence([91, 49, 59, 51, 68]) == "word_left"
+    assert decode_alt_sequence([91, 49, 59, 51, 67]) == "word_right"
+
+
+def test_word_cursor_helpers_move_across_tokens() -> None:
+    text = "alpha   beta gamma"
+    assert move_cursor_word_left(text, len(text)) == 13
+    assert move_cursor_word_left(text, 13) == 8
+    assert move_cursor_word_right(text, 0) == 5
+    assert move_cursor_word_right(text, 5) == 12
+
+
+def test_input_wrapped_view_tracks_cursor_position(tmp_path) -> None:
+    app = LangGraphTui(
+        base_url="http://localhost:8080",
+        application_id="cli-test",
+        profile_id="cli-user",
+        thread_id="thread-test",
+        log_file=tmp_path / "events.jsonl",
+    )
+    app._input_buffer = "one two three four five six seven"
+    app._input_cursor = len("one two three four")
+
+    visible, cursor_row, cursor_col = app._input_wrapped_view(text_width=10, rows=3)
+    assert len(visible) == 3
+    assert 0 <= cursor_row < 3
+    assert 0 <= cursor_col < 10
 
 
 def test_tui_preserves_stream_output_after_completion(tmp_path) -> None:

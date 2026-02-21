@@ -69,6 +69,43 @@ def normalize_display_text(value: str) -> str:
     return "".join(char if 32 <= ord(char) <= 126 else " " for char in ascii_text)
 
 
+def move_cursor_word_left(text: str, cursor: int) -> int:
+    idx = max(0, min(cursor, len(text)))
+    while idx > 0 and text[idx - 1].isspace():
+        idx -= 1
+    while idx > 0 and not text[idx - 1].isspace():
+        idx -= 1
+    return idx
+
+
+def move_cursor_word_right(text: str, cursor: int) -> int:
+    idx = max(0, min(cursor, len(text)))
+    while idx < len(text) and text[idx].isspace():
+        idx += 1
+    while idx < len(text) and not text[idx].isspace():
+        idx += 1
+    return idx
+
+
+def decode_alt_sequence(sequence: list[int]) -> str | None:
+    if not sequence:
+        return None
+    if sequence == [ord("b")]:
+        return "word_left"
+    if sequence == [ord("f")]:
+        return "word_right"
+    last = sequence[-1]
+    if last == ord("b"):
+        return "word_left"
+    if last == ord("f"):
+        return "word_right"
+    if last in (ord("D"), 68) and 51 in sequence:
+        return "word_left"
+    if last in (ord("C"), 67) and 51 in sequence:
+        return "word_right"
+    return None
+
+
 def wrap_lines(lines: list[str], width: int) -> list[str]:
     wrapped: list[str] = []
     for line in lines:
@@ -150,6 +187,7 @@ def stream_agent_events(
 
 
 class LangGraphTui:
+    PANEL_INPUT = "input"
     PANEL_TRANSCRIPT = "transcript"
     PANEL_REASONING = "reasoning"
     PANEL_OUTPUT = "output"
@@ -178,6 +216,7 @@ class LangGraphTui:
         self._streaming = False
 
         self._input_buffer = ""
+        self._input_cursor = 0
         self._status_line = "Type a prompt and press Enter. Use /quit to exit."
 
         self._transcript_lines: list[str] = []
@@ -191,6 +230,7 @@ class LangGraphTui:
         self._event_lines: list[str] = []
 
         self._panel_order = [
+            self.PANEL_INPUT,
             self.PANEL_TRANSCRIPT,
             self.PANEL_REASONING,
             self.PANEL_OUTPUT,
@@ -207,6 +247,7 @@ class LangGraphTui:
 
         self._colors_enabled = False
         self._color_pairs: dict[str, int] = {}
+        self._pending_meta = False
 
         # Prevent a large burst of events from being consumed in one frame.
         self._max_events_per_tick = 32
@@ -276,28 +317,29 @@ class LangGraphTui:
             return
         curses.start_color()
         curses.use_default_colors()
-        # Core surface colors by panel.
-        curses.init_pair(1, curses.COLOR_CYAN, -1)  # transcript
-        curses.init_pair(2, curses.COLOR_YELLOW, -1)  # reasoning
-        curses.init_pair(3, curses.COLOR_GREEN, -1)  # output
-        curses.init_pair(4, curses.COLOR_MAGENTA, -1)  # diagnostics
-        curses.init_pair(5, curses.COLOR_BLUE, -1)  # events
-        curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_CYAN)  # focused border/title
-        curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_WHITE)  # status/input label
-        curses.init_pair(8, curses.COLOR_WHITE, -1)  # help
-        curses.init_pair(9, curses.COLOR_WHITE, -1)  # scrollbar track
-        curses.init_pair(10, curses.COLOR_CYAN, -1)  # scrollbar thumb
+        # Professional muted theme: grayscale base with inverse focus state.
+        curses.init_pair(1, curses.COLOR_WHITE, -1)  # body text
+        curses.init_pair(2, curses.COLOR_WHITE, -1)  # border/title
+        curses.init_pair(3, curses.COLOR_BLACK, curses.COLOR_WHITE)  # focused border/title
+        curses.init_pair(4, curses.COLOR_BLACK, curses.COLOR_WHITE)  # status/input label
+        curses.init_pair(5, curses.COLOR_WHITE, -1)  # help
+        curses.init_pair(6, curses.COLOR_WHITE, -1)  # scrollbar track
+        curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_WHITE)  # scrollbar thumb
+        curses.init_pair(8, curses.COLOR_WHITE, -1)  # focused panel text
         self._color_pairs = {
+            self.PANEL_INPUT: 1,
             self.PANEL_TRANSCRIPT: 1,
-            self.PANEL_REASONING: 2,
-            self.PANEL_OUTPUT: 3,
-            self.PANEL_DIAGNOSTICS: 4,
-            self.PANEL_EVENTS: 5,
-            "focused": 6,
-            "status": 7,
-            "help": 8,
-            "scroll_track": 9,
-            "scroll_thumb": 10,
+            self.PANEL_REASONING: 1,
+            self.PANEL_OUTPUT: 1,
+            self.PANEL_DIAGNOSTICS: 1,
+            self.PANEL_EVENTS: 1,
+            "border": 2,
+            "focused": 3,
+            "status": 4,
+            "help": 5,
+            "scroll_track": 6,
+            "scroll_thumb": 7,
+            "focused_text": 8,
         }
         self._colors_enabled = True
 
@@ -377,13 +419,79 @@ class LangGraphTui:
         else:
             self._scroll_offsets[panel] = 0
 
+    @staticmethod
+    def _consume_escape_sequence(screen) -> list[int]:
+        sequence: list[int] = []
+        try:
+            screen.nodelay(False)
+            screen.timeout(80)
+            nxt = screen.getch()
+            if nxt == -1:
+                return sequence
+            sequence.append(nxt)
+            screen.timeout(5)
+            while len(sequence) < 8:
+                nxt = screen.getch()
+                if nxt == -1:
+                    break
+                sequence.append(nxt)
+        finally:
+            screen.timeout(0)
+            screen.nodelay(True)
+        return sequence
+
+    def _insert_input_text(self, value: str) -> None:
+        prefix = self._input_buffer[: self._input_cursor]
+        suffix = self._input_buffer[self._input_cursor :]
+        self._input_buffer = f"{prefix}{value}{suffix}"
+        self._input_cursor += len(value)
+
+    def _delete_before_cursor(self) -> None:
+        if self._input_cursor <= 0:
+            return
+        prefix = self._input_buffer[: self._input_cursor - 1]
+        suffix = self._input_buffer[self._input_cursor :]
+        self._input_buffer = f"{prefix}{suffix}"
+        self._input_cursor -= 1
+
+    def _delete_at_cursor(self) -> None:
+        if self._input_cursor >= len(self._input_buffer):
+            return
+        prefix = self._input_buffer[: self._input_cursor]
+        suffix = self._input_buffer[self._input_cursor + 1 :]
+        self._input_buffer = f"{prefix}{suffix}"
+
     def _read_key(self, screen) -> None:
         key = screen.getch()
         if key == -1:
             return
 
+        focused = self._focused_panel()
+
+        if self._pending_meta:
+            self._pending_meta = False
+            if focused == self.PANEL_INPUT and key in (ord("b"), ord("f")):
+                if key == ord("b"):
+                    self._input_cursor = move_cursor_word_left(self._input_buffer, self._input_cursor)
+                else:
+                    self._input_cursor = move_cursor_word_right(self._input_buffer, self._input_cursor)
+                return
+            if key == ord("["):
+                sequence = [ord("[")] + self._consume_escape_sequence(screen)
+                action = decode_alt_sequence(sequence)
+                if focused == self.PANEL_INPUT and action == "word_left":
+                    self._input_cursor = move_cursor_word_left(self._input_buffer, self._input_cursor)
+                    return
+                if focused == self.PANEL_INPUT and action == "word_right":
+                    self._input_cursor = move_cursor_word_right(self._input_buffer, self._input_cursor)
+                    return
+
         if key in (3,):  # Ctrl+C
             self._running = False
+            return
+
+        if key in (ord("i"), ord("I")) and focused != self.PANEL_INPUT:
+            self._set_focus_panel(self.PANEL_INPUT)
             return
 
         if key == 9:  # Tab
@@ -395,26 +503,40 @@ class LangGraphTui:
             return
 
         if key == curses.KEY_UP:
+            if focused == self.PANEL_INPUT:
+                return
             self._scroll_focused(1)
             return
 
         if key == curses.KEY_DOWN:
+            if focused == self.PANEL_INPUT:
+                return
             self._scroll_focused(-1)
             return
 
         if key == curses.KEY_PPAGE:
+            if focused == self.PANEL_INPUT:
+                return
             self._scroll_focused(self._panel_page_sizes.get(self._focused_panel(), 10))
             return
 
         if key == curses.KEY_NPAGE:
+            if focused == self.PANEL_INPUT:
+                return
             self._scroll_focused(-self._panel_page_sizes.get(self._focused_panel(), 10))
             return
 
         if key == curses.KEY_HOME:
+            if focused == self.PANEL_INPUT:
+                self._input_cursor = 0
+                return
             self._jump_scroll(to_top=True)
             return
 
         if key == curses.KEY_END:
+            if focused == self.PANEL_INPUT:
+                self._input_cursor = len(self._input_buffer)
+                return
             self._jump_scroll(to_top=False)
             return
 
@@ -423,10 +545,6 @@ class LangGraphTui:
                 _, mouse_x, mouse_y, _, button_state = curses.getmouse()
             except curses.error:
                 return
-
-            panel = self._panel_from_coords(mouse_y, mouse_x)
-            if panel is not None:
-                self._set_focus_panel(panel)
 
             left_click_mask = (
                 getattr(curses, "BUTTON1_PRESSED", 0)
@@ -446,26 +564,59 @@ class LangGraphTui:
                 | getattr(curses, "BUTTON5_DOUBLE_CLICKED", 0)
                 | getattr(curses, "BUTTON5_TRIPLE_CLICKED", 0)
             )
+            panel = self._panel_from_coords(mouse_y, mouse_x)
+
+            if panel is not None and button_state & left_click_mask:
+                self._set_focus_panel(panel)
+                if panel != self.PANEL_INPUT and self._is_scrollbar_click(panel, mouse_y, mouse_x):
+                    self._scroll_to_track_position(panel, mouse_y)
+                return
 
             if button_state & wheel_up_mask:
-                self._scroll_focused(3)
+                if self._focused_panel() != self.PANEL_INPUT:
+                    self._scroll_focused(3)
                 return
 
             if button_state & wheel_down_mask:
-                self._scroll_focused(-3)
-                return
-
-            if panel is not None and button_state & left_click_mask and self._is_scrollbar_click(
-                panel, mouse_y, mouse_x
-            ):
-                self._scroll_to_track_position(panel, mouse_y)
+                if self._focused_panel() != self.PANEL_INPUT:
+                    self._scroll_focused(-3)
                 return
 
             return
 
+        if key == curses.KEY_LEFT:
+            if focused == self.PANEL_INPUT and self._input_cursor > 0:
+                self._input_cursor -= 1
+            return
+
+        if key == curses.KEY_RIGHT:
+            if focused == self.PANEL_INPUT and self._input_cursor < len(self._input_buffer):
+                self._input_cursor += 1
+            return
+
+        if key == curses.KEY_DC:
+            if focused == self.PANEL_INPUT:
+                self._delete_at_cursor()
+            return
+
+        if key == 27:  # Escape sequence (Alt/meta chords on mac terminals).
+            sequence = self._consume_escape_sequence(screen)
+            if not sequence:
+                self._pending_meta = True
+                return
+            action = decode_alt_sequence(sequence)
+            if focused == self.PANEL_INPUT and action == "word_left":
+                self._input_cursor = move_cursor_word_left(self._input_buffer, self._input_cursor)
+            elif focused == self.PANEL_INPUT and action == "word_right":
+                self._input_cursor = move_cursor_word_right(self._input_buffer, self._input_cursor)
+            return
+
         if key in (10, 13):  # Enter
+            if focused != self.PANEL_INPUT:
+                return
             value = self._input_buffer.strip()
             self._input_buffer = ""
+            self._input_cursor = 0
             if not value:
                 return
             if value in {"/quit", "/exit"}:
@@ -491,15 +642,40 @@ class LangGraphTui:
             return
 
         if key in (curses.KEY_BACKSPACE, 8, 127):
-            self._input_buffer = self._input_buffer[:-1]
+            if focused == self.PANEL_INPUT:
+                self._delete_before_cursor()
             return
 
         if key == 14:  # Ctrl+N inserts newline in prompt composer.
-            self._input_buffer += "\n"
+            if focused == self.PANEL_INPUT:
+                self._insert_input_text("\n")
             return
 
         if 32 <= key <= 126:
-            self._input_buffer += chr(key)
+            if focused == self.PANEL_INPUT:
+                self._insert_input_text(chr(key))
+
+    def _input_wrapped_view(self, text_width: int, rows: int) -> tuple[list[str], int, int]:
+        all_lines = wrap_lines([self._input_buffer], width=max(1, text_width)) or [""]
+        prefix_lines = wrap_lines(
+            [self._input_buffer[: self._input_cursor]],
+            width=max(1, text_width),
+        ) or [""]
+        cursor_abs_row = max(0, len(prefix_lines) - 1)
+        cursor_col = len(prefix_lines[-1]) if prefix_lines else 0
+        if cursor_abs_row >= len(all_lines):
+            cursor_abs_row = max(0, len(all_lines) - 1)
+            cursor_col = len(all_lines[cursor_abs_row]) if all_lines else 0
+
+        start = max(0, cursor_abs_row - rows + 1)
+        max_start = max(0, len(all_lines) - rows)
+        start = min(start, max_start)
+        visible = all_lines[start : start + rows]
+        while len(visible) < rows:
+            visible.append("")
+        cursor_row = min(rows - 1, max(0, cursor_abs_row - start))
+        cursor_col = min(max(0, text_width - 1), max(0, cursor_col))
+        return visible, cursor_row, cursor_col
 
     def _start_stream(self, message: str) -> None:
         self._streaming = True
@@ -656,17 +832,43 @@ class LangGraphTui:
         height, width = screen.getmaxyx()
 
         composer_rows = 3
-        input_height = 1 + 1 + composer_rows + 2
-        main_height = max(8, height - input_height)
+        status_rows = 1
+        help_rows = 2
+        input_panel_height = 2 + composer_rows
+        reserved_rows = status_rows + input_panel_height + help_rows
+        main_height = max(8, height - reserved_rows)
+        if main_height + reserved_rows > height:
+            main_height = max(3, height - reserved_rows)
         left_width = max(45, int(width * 0.65))
         right_width = width - left_width
 
-        left_transcript_height = max(5, int(main_height * 0.48))
-        left_reasoning_height = max(4, int(main_height * 0.22))
-        left_output_height = main_height - left_transcript_height - left_reasoning_height
+        left_transcript_height = max(3, int(main_height * 0.48))
+        left_reasoning_height = max(3, int(main_height * 0.22))
+        left_output_height = max(3, main_height - left_transcript_height - left_reasoning_height)
+        left_total = left_transcript_height + left_reasoning_height + left_output_height
+        while left_total > main_height and left_transcript_height > 3:
+            left_transcript_height -= 1
+            left_total -= 1
+        while left_total > main_height and left_reasoning_height > 3:
+            left_reasoning_height -= 1
+            left_total -= 1
+        while left_total > main_height and left_output_height > 3:
+            left_output_height -= 1
+            left_total -= 1
+        if left_total < main_height:
+            left_output_height += main_height - left_total
 
-        right_diag_height = max(5, int(main_height * 0.63))
-        right_event_height = main_height - right_diag_height
+        right_diag_height = max(3, int(main_height * 0.63))
+        right_event_height = max(3, main_height - right_diag_height)
+        right_total = right_diag_height + right_event_height
+        while right_total > main_height and right_diag_height > 3:
+            right_diag_height -= 1
+            right_total -= 1
+        while right_total > main_height and right_event_height > 3:
+            right_event_height -= 1
+            right_total -= 1
+        if right_total < main_height:
+            right_event_height += main_height - right_total
 
         self._panel_regions.clear()
         self._scrollbar_regions.clear()
@@ -722,11 +924,6 @@ class LangGraphTui:
             lines=self._event_lines,
         )
 
-        prompt_lines = wrap_lines([self._input_buffer], width=max(1, width - 4))
-        visible_prompt = prompt_lines[-composer_rows:] if prompt_lines else [""]
-        if len(prompt_lines) > composer_rows and visible_prompt:
-            visible_prompt[0] = f"...{visible_prompt[0]}"
-
         focused = self._focused_panel()
         status = (
             f"{self._status_line} | app={self.application_id} | thread={self.thread_id or '-'} | "
@@ -742,29 +939,24 @@ class LangGraphTui:
             status_attr,
         )
 
-        input_label_row = status_row + 1
-        input_label = "Input (Ctrl+N newline, Enter send):"
-        screen.addnstr(
-            input_label_row,
-            0,
-            normalize_display_text(input_label).ljust(width),
-            width - 1,
-            status_attr,
-        )
-
-        prompt_start_row = input_label_row + 1
-        for idx, line in enumerate(visible_prompt[:composer_rows]):
-            prefix = "> " if idx == 0 else "  "
-            prompt_line = f"{prefix}{line}"
-            screen.addnstr(
-                prompt_start_row + idx,
-                0,
-                normalize_display_text(prompt_line).ljust(width),
-                width - 1,
+        cursor_row = status_row + 1
+        cursor_col = 1
+        if status_row + input_panel_height <= height - help_rows:
+            cursor_row, cursor_col = self._draw_input_panel(
+                screen,
+                y=status_row + 1,
+                x=0,
+                height=input_panel_height,
+                width=width,
+                composer_rows=composer_rows,
             )
 
-        help_line_1 = "Navigation: Tab/Shift+Tab focus | Up/Down line scroll | PgUp/PgDn page scroll | Home/End jump"
-        help_line_2 = "Mouse: click panel focus | click scrollbar for fine scroll | wheel scroll | /clear | /quit"
+        help_line_1 = (
+            "Navigation: Tab/Shift+Tab focus  |  Up/Down line scroll  |  PgUp/PgDn page scroll  |  Home/End jump"
+        )
+        help_line_2 = (
+            "Mouse: click panel focus  |  click scrollbar for fine scroll  |  wheel scroll  |  /clear  |  /quit"
+        )
         help_attr = self._color_attr("help")
         screen.addnstr(
             height - 2,
@@ -781,16 +973,77 @@ class LangGraphTui:
             help_attr,
         )
 
-        # Place the cursor exactly where the user is typing.
-        cursor_line = visible_prompt[-1] if visible_prompt else ""
-        cursor_row = prompt_start_row + min(len(visible_prompt) - 1, composer_rows - 1)
-        cursor_col = min(width - 1, 2 + len(normalize_display_text(cursor_line)))
+        try:
+            curses.curs_set(1 if self._focused_panel() == self.PANEL_INPUT else 0)
+        except curses.error:
+            pass
+
+        cursor_col = min(max(0, cursor_col), max(0, width - 2))
+        cursor_row = min(max(0, cursor_row), max(0, height - 1))
         try:
             screen.move(cursor_row, cursor_col)
         except curses.error:
             pass
 
         screen.refresh()
+
+    def _draw_input_panel(
+        self,
+        screen,
+        *,
+        y: int,
+        x: int,
+        height: int,
+        width: int,
+        composer_rows: int,
+    ) -> tuple[int, int]:
+        if height < 3 or width < 10:
+            return y, x + 1
+
+        panel = screen.derwin(height, width, y, x)
+        self._panel_regions[self.PANEL_INPUT] = (y, x, height, width)
+        focused = self._focused_panel() == self.PANEL_INPUT
+        border_attr = self._color_attr("focused" if focused else "border")
+        text_attr = self._color_attr(self.PANEL_INPUT)
+        if focused:
+            text_attr |= curses.A_BOLD
+
+        if border_attr:
+            panel.attron(border_attr)
+        panel.box()
+        if border_attr:
+            panel.attroff(border_attr)
+
+        title = "Chat Input [ACTIVE]" if focused else "Chat Input"
+        panel.addnstr(
+            0,
+            2,
+            normalize_display_text(title)[: max(1, width - 4)],
+            max(1, width - 4),
+            border_attr | (curses.A_BOLD if focused else 0),
+        )
+
+        text_col = 3
+        text_width = max(1, width - (text_col + 2))
+        visible_prompt, cursor_row, cursor_col = self._input_wrapped_view(text_width, composer_rows)
+
+        for idx, line in enumerate(visible_prompt[:composer_rows]):
+            marker = ">" if idx == cursor_row else " "
+            marker_attr = border_attr | curses.A_BOLD if idx == cursor_row and focused else text_attr
+            panel.addnstr(idx + 1, 1, marker, 1, marker_attr)
+            panel.addnstr(
+                idx + 1,
+                2,
+                " ",
+                1,
+                marker_attr,
+            )
+            safe_text = normalize_display_text(line)[:text_width]
+            panel.addnstr(idx + 1, text_col, safe_text.ljust(text_width), text_width, text_attr)
+
+        cursor_y = y + 1 + min(composer_rows - 1, max(0, cursor_row))
+        cursor_x = x + text_col + min(text_width - 1, max(0, cursor_col))
+        return cursor_y, cursor_x
 
     def _draw_panel(
         self,
@@ -810,8 +1063,12 @@ class LangGraphTui:
         self._panel_regions[panel_id] = (y, x, height, width)
         panel = screen.derwin(height, width, y, x)
         focused = panel_id == self._focused_panel()
-        border_attr = self._color_attr("focused" if focused else panel_id)
+        border_attr = self._color_attr("focused" if focused else "border")
         text_attr = self._color_attr(panel_id)
+        if focused:
+            border_attr |= curses.A_BOLD
+        else:
+            border_attr |= curses.A_DIM
         track_attr = self._color_attr("scroll_track")
         thumb_attr = self._color_attr("scroll_thumb")
         if border_attr:
