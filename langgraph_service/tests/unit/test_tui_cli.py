@@ -15,6 +15,7 @@ tui_spec.loader.exec_module(tui_module)
 
 format_run_diagnostics = tui_module.format_run_diagnostics
 LangGraphTui = tui_module.LangGraphTui
+normalize_display_text = tui_module.normalize_display_text
 parse_stream_line = tui_module.parse_stream_line
 viewport_slice = tui_module.viewport_slice
 wrap_lines = tui_module.wrap_lines
@@ -85,6 +86,18 @@ def test_wrap_lines_and_viewport_slice_support_scrollback() -> None:
     assert older[0].strip().startswith("alpha")
 
 
+def test_wrap_lines_sanitizes_multiline_and_control_chars() -> None:
+    wrapped = wrap_lines(["line-1\nline\x00-2\tend"], width=40)
+    assert len(wrapped) >= 2
+    assert all("\n" not in line for line in wrapped)
+    assert all("\x00" not in line for line in wrapped)
+
+
+def test_normalize_display_text_ascii_sanitization() -> None:
+    normalized = normalize_display_text("hello\tworld\nsnowman=\u2603")
+    assert normalized == "hello world snowman=?"
+
+
 def test_tui_preserves_stream_output_after_completion(tmp_path) -> None:
     app = LangGraphTui(
         base_url="http://localhost:8080",
@@ -126,3 +139,22 @@ def test_tui_preserves_stream_output_after_completion(tmp_path) -> None:
     assert app._active_output == ""
     assert any("hello world" in line for line in app._output_history_lines)
     assert any("hello world" in line for line in app._transcript_lines)
+
+
+def test_tui_transcript_entries_are_separated(tmp_path) -> None:
+    app = LangGraphTui(
+        base_url="http://localhost:8080",
+        application_id="cli-test",
+        profile_id="cli-user",
+        thread_id="thread-test",
+        log_file=tmp_path / "events.jsonl",
+    )
+
+    app._append_transcript("user", "first line\nsecond line")
+    app._append_transcript("assistant", "reply")
+
+    assert app._transcript_lines[0].endswith(" user")
+    assert app._transcript_lines[1] == "first line"
+    assert app._transcript_lines[2] == "second line"
+    assert app._transcript_lines[3] == ""
+    assert any(line.endswith(" assistant") for line in app._transcript_lines)

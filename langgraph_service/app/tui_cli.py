@@ -64,16 +64,23 @@ def format_run_diagnostics(run: dict[str, Any]) -> list[str]:
     return lines
 
 
+def normalize_display_text(value: str) -> str:
+    ascii_text = value.encode("ascii", errors="replace").decode("ascii")
+    return "".join(char if 32 <= ord(char) <= 126 else " " for char in ascii_text)
+
+
 def wrap_lines(lines: list[str], width: int) -> list[str]:
     wrapped: list[str] = []
     for line in lines:
-        chunks = textwrap.wrap(
-            line,
-            width=max(1, width),
-            replace_whitespace=False,
-            drop_whitespace=False,
-        ) or [""]
-        wrapped.extend(chunks)
+        for logical_line in str(line).replace("\r", "").split("\n") or [""]:
+            sanitized = normalize_display_text(logical_line.expandtabs(4))
+            chunks = textwrap.wrap(
+                sanitized,
+                width=max(1, width),
+                replace_whitespace=False,
+                drop_whitespace=False,
+            ) or [""]
+            wrapped.extend(chunks)
     return wrapped
 
 
@@ -187,6 +194,13 @@ class LangGraphTui:
     def run(self) -> None:
         curses.wrapper(self._main)
 
+    def _append_transcript(self, role: str, text: str) -> None:
+        timestamp = datetime.now(UTC).strftime("%H:%M:%S")
+        self._transcript_lines.append(f"[{timestamp}] {role}")
+        cleaned = str(text).replace("\r", "")
+        self._transcript_lines.extend(cleaned.split("\n") or [""])
+        self._transcript_lines.append("")
+
     def _main(self, screen) -> None:
         curses.curs_set(1)
         screen.nodelay(True)
@@ -298,7 +312,7 @@ class LangGraphTui:
         self._active_output = ""
         self._active_run_id = None
         self._status_line = "Streaming..."
-        self._transcript_lines.append(f"[user] {message}")
+        self._append_transcript("user", message)
         self._append_event("local", "queued", "user prompt submitted")
         self._scroll_offsets[self.PANEL_REASONING] = 0
         self._scroll_offsets[self.PANEL_OUTPUT] = 0
@@ -357,7 +371,7 @@ class LangGraphTui:
         if self._active_output.strip():
             self._output_history_lines.append(f"[{timestamp}] [{run_label}] {self._active_output}")
             if add_to_transcript:
-                self._transcript_lines.append(f"[assistant] {self._active_output}")
+                self._append_transcript("assistant", self._active_output)
 
         self._active_reasoning = ""
         self._active_output = ""
@@ -398,7 +412,7 @@ class LangGraphTui:
             self._streaming = False
             self._status_line = "Error."
             self._finalize_active_buffers(add_to_transcript=False)
-            self._transcript_lines.append(f"[error] {payload.get('message', 'unknown error')}")
+            self._append_transcript("error", str(payload.get("message", "unknown error")))
 
         event_message = str(message or delta or "")
         self._append_event(event_type, stream_state, event_message[:120])
@@ -550,10 +564,15 @@ class LangGraphTui:
         focus_marker = "*" if panel_id == self._focused_panel() else " "
         offset = self._scroll_offsets.get(panel_id, 0)
         title_suffix = f" {offset}/{max_offset}" if max_offset > 0 else ""
-        panel.addnstr(0, 2, f"{focus_marker}{title}{title_suffix}", max(1, width - 4))
+        panel_title = normalize_display_text(f"{focus_marker}{title}{title_suffix}")
+        panel.addnstr(0, 2, panel_title[: max(1, width - 4)], max(1, width - 4))
 
-        for row, text in enumerate(visible, start=1):
-            panel.addnstr(row, 1, text.ljust(inner_width), inner_width)
+        for row, text in enumerate(visible[:inner_height], start=1):
+            safe_text = normalize_display_text(text)[:inner_width]
+            try:
+                panel.addnstr(row, 1, safe_text.ljust(inner_width), inner_width)
+            except curses.error:
+                continue
 
 
 def build_parser() -> argparse.ArgumentParser:
