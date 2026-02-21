@@ -19,6 +19,7 @@ Service/runtime dependencies:
 - `uvicorn[standard]==0.41.0`
 - `asyncpg==0.31.0`
 - `redis==7.2.0`
+- `httpx==0.28.1`
 - `pydantic-settings==2.13.1`
 
 ## Agent Runtime Style
@@ -48,6 +49,15 @@ Event types emitted by `POST /agent/stream`:
 - `content`
 - `complete`
 - `error`
+
+Each stream event may include `payload.run` diagnostics with LangSmith-style fields:
+
+- run identity: `run_id`, `trace_id`, `name`, `run_type`, `status`
+- tracing context: `langsmith_project`, `langsmith_endpoint`, `langsmith_tracing_enabled`
+- model chain: `model_primary`, `model_fallbacks`, `model_selected`, `model_provider`
+- usage and timings: `token_usage`, `started_at`, `finished_at`, `latency_ms`
+- execution detail: `tool_calls`, `tool_call_count`, message/chunk counters
+- session metadata: `application_id`, `thread_id`, `profile_id`
 
 Agent entrypoint:
 
@@ -93,6 +103,27 @@ From `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/langgraph_service`:
    - `langgraph dev --config langgraph.json`
 3. Authenticate/validate LangSmith CLI:
    - `langsmith --help`
+
+## Interactive TUI CLI
+
+A first-party terminal UI client is included for direct LangGraph interaction with reasoning/output streaming and diagnostics panels.
+
+Run from repository root:
+
+- `scripts/langgraph-tui --langgraph-url http://localhost:8080`
+
+Options:
+
+- `--application-id` (default: generated `cli-<id>`)
+- `--thread-id` (optional existing thread)
+- `--profile-id` (default: `cli-user`)
+- `--log-file` (default: `logs/langgraph_tui_events.jsonl`)
+
+In-TUI commands:
+
+- `Enter`: submit prompt
+- `/clear`: reset panes
+- `/quit` or `/exit`: close client
 
 ## Container Runtime
 

@@ -6,6 +6,7 @@ This repository implements a localhost-first, production-parity-capable infrastr
 - Separate LangGraph runtime service
 - Persistent application ID <-> LangGraph thread ID mapping
 - Streaming content/reasoning/status relays over WebSocket
+- Interactive terminal UI client for direct LangGraph runs with streaming diagnostics
 - TypeScript frontend for local manual validation
 
 ## Source of Truth Prompt
@@ -39,3 +40,15 @@ Work is delivered in phased feature branches and merged to `main` after validati
 - `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/docs/PHASE_PLAN.md`
 - `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/docs/ARCHITECTURE_DECISIONS.md`
 - `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/docs/LANGGRAPH_AGENT_REQUIREMENTS.md`
+
+## LangGraph TUI CLI
+
+Run from repository root:
+
+- `scripts/langgraph-tui --langgraph-url http://localhost:8080`
+
+The TUI supports:
+
+- live reasoning and content streaming
+- run diagnostics panel with LangSmith-style metadata (run IDs, model selection, token usage, latency, tool calls)
+- persistent JSONL run/event logging (`logs/langgraph_tui_events.jsonl` by default)

@@ -71,7 +71,22 @@ class SuccessfulGraph:
         return {
             "messages": [
                 ToolMessage(content="tool output", tool_call_id="tool-1"),
-                AIMessage(content="final answer"),
+                AIMessage(
+                    content="final answer",
+                    response_metadata={
+                        "model": "kimi-k2.5:cloud",
+                        "prompt_eval_count": 8,
+                        "eval_count": 6,
+                    },
+                    tool_calls=[
+                        {
+                            "id": "tool-call-1",
+                            "name": "describe_session_context",
+                            "type": "tool_call",
+                            "args": {"application_id": "app-stream"},
+                        }
+                    ],
+                ),
             ]
         }
 
@@ -109,12 +124,21 @@ async def test_agent_stream_emits_reasoning_content_and_complete() -> None:
     assert events[0]["type"] == "status"
     assert events[0]["stream_state"] == "queued"
     assert [event["type"] for event in events][-1] == "complete"
+    assert "run_id" in events[0]["payload"]["run"]
+    assert events[0]["payload"]["run"]["status"] == "running"
 
     reasoning_deltas = [event["payload"]["delta"] for event in events if event["type"] == "reasoning"]
     content_deltas = [event["payload"]["delta"] for event in events if event["type"] == "content"]
+    completion_run = events[-1]["payload"]["run"]
 
     assert "".join(reasoning_deltas) == "tool output"
     assert "".join(content_deltas) == "final answer"
+    assert completion_run["status"] == "completed"
+    assert completion_run["model_selected"] == "kimi-k2.5:cloud"
+    assert completion_run["token_usage"]["prompt_tokens"] == 8
+    assert completion_run["token_usage"]["completion_tokens"] == 6
+    assert completion_run["tool_call_count"] == 1
+    assert completion_run["content_chunk_count"] >= 1
 
 
 @pytest.mark.asyncio
@@ -137,3 +161,5 @@ async def test_agent_stream_emits_error_event_on_failure() -> None:
     assert [event["type"] for event in events] == ["status", "error"]
     assert events[1]["stream_state"] == "error"
     assert "Agent invocation failed" in events[1]["payload"]["message"]
+    assert events[1]["payload"]["run"]["status"] == "error"
+    assert events[1]["payload"]["run"]["error"] is not None
