@@ -108,6 +108,20 @@ def ensure_thread(base_url: str, application_id: str) -> str:
     return thread_id
 
 
+def fetch_thread_history(base_url: str, thread_id: str, limit: int = 300) -> list[dict[str, Any]]:
+    with httpx.Client(timeout=20.0) as client:
+        response = client.get(
+            f"{base_url.rstrip('/')}/threads/{thread_id}/history",
+            params={"limit": limit},
+        )
+        response.raise_for_status()
+        payload = response.json()
+    entries = payload.get("entries")
+    if not isinstance(entries, list):
+        return []
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
 def stream_agent_events(
     *,
     base_url: str,
@@ -188,6 +202,11 @@ class LangGraphTui:
         self._panel_max_offsets = {panel: 0 for panel in self._panel_order}
         self._panel_page_sizes = {panel: 10 for panel in self._panel_order}
         self._panel_regions: dict[str, tuple[int, int, int, int]] = {}
+        self._scrollbar_regions: dict[str, tuple[int, int, int, int]] = {}
+        self._history_loaded = False
+
+        self._colors_enabled = False
+        self._color_pairs: dict[str, int] = {}
 
         # Prevent a large burst of events from being consumed in one frame.
         self._max_events_per_tick = 32
@@ -195,17 +214,98 @@ class LangGraphTui:
     def run(self) -> None:
         curses.wrapper(self._main)
 
-    def _append_transcript(self, role: str, text: str) -> None:
-        timestamp = datetime.now(UTC).strftime("%H:%M:%S")
+    def _append_transcript(self, role: str, text: str, *, timestamp: str | None = None) -> None:
+        timestamp = timestamp or datetime.now(UTC).strftime("%H:%M:%S")
         self._transcript_lines.append(f"[{timestamp}] {role}")
         cleaned = str(text).replace("\r", "")
         self._transcript_lines.extend(cleaned.split("\n") or [""])
         self._transcript_lines.append("")
 
+    def _hydrate_from_history(self) -> None:
+        if self._history_loaded or self.thread_id is None:
+            return
+        try:
+            entries = fetch_thread_history(self.base_url, self.thread_id, limit=300)
+        except Exception:
+            return
+
+        for entry in entries:
+            channel = str(entry.get("channel", "transcript"))
+            role = str(entry.get("role", "system"))
+            content = str(entry.get("content", ""))
+            created_at = str(entry.get("created_at", ""))
+            run_id = entry.get("run_id")
+            metadata = entry.get("metadata", {})
+            if not isinstance(metadata, dict):
+                metadata = {}
+
+            ts = datetime.now(UTC).strftime("%H:%M:%S")
+            if created_at:
+                try:
+                    ts = datetime.fromisoformat(created_at).strftime("%H:%M:%S")
+                except ValueError:
+                    ts = datetime.now(UTC).strftime("%H:%M:%S")
+
+            if channel == "transcript":
+                self._append_transcript(role, content, timestamp=ts)
+                if role == "assistant":
+                    label = run_id if isinstance(run_id, str) and run_id else "run-history"
+                    self._output_history_lines.append(f"[{ts}] [{label}] {content}")
+                continue
+
+            if channel == "reasoning":
+                label = run_id if isinstance(run_id, str) and run_id else "run-history"
+                self._reasoning_history_lines.append(f"[{ts}] [{label}] {content}")
+                continue
+
+            if channel == "diagnostics":
+                run_payload = metadata.get("run")
+                if isinstance(run_payload, dict):
+                    self._diagnostic_lines.append(f"[{created_at or ts}] run diagnostics")
+                    self._diagnostic_lines.extend(format_run_diagnostics(run_payload))
+                    self._diagnostic_lines.append("-" * 16)
+                continue
+
+            if channel == "error":
+                self._append_transcript("error", content, timestamp=ts)
+
+        self._history_loaded = True
+
+    def _init_colors(self) -> None:
+        if not curses.has_colors():
+            return
+        curses.start_color()
+        curses.use_default_colors()
+        # Core surface colors by panel.
+        curses.init_pair(1, curses.COLOR_CYAN, -1)  # transcript
+        curses.init_pair(2, curses.COLOR_YELLOW, -1)  # reasoning
+        curses.init_pair(3, curses.COLOR_GREEN, -1)  # output
+        curses.init_pair(4, curses.COLOR_MAGENTA, -1)  # diagnostics
+        curses.init_pair(5, curses.COLOR_BLUE, -1)  # events
+        curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_CYAN)  # focused border/title
+        curses.init_pair(7, curses.COLOR_BLACK, curses.COLOR_WHITE)  # status/input label
+        curses.init_pair(8, curses.COLOR_WHITE, -1)  # help
+        curses.init_pair(9, curses.COLOR_WHITE, -1)  # scrollbar track
+        curses.init_pair(10, curses.COLOR_CYAN, -1)  # scrollbar thumb
+        self._color_pairs = {
+            self.PANEL_TRANSCRIPT: 1,
+            self.PANEL_REASONING: 2,
+            self.PANEL_OUTPUT: 3,
+            self.PANEL_DIAGNOSTICS: 4,
+            self.PANEL_EVENTS: 5,
+            "focused": 6,
+            "status": 7,
+            "help": 8,
+            "scroll_track": 9,
+            "scroll_thumb": 10,
+        }
+        self._colors_enabled = True
+
     def _main(self, screen) -> None:
         curses.curs_set(1)
         screen.nodelay(True)
         screen.keypad(True)
+        self._init_colors()
         curses.mouseinterval(0)
         try:
             curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
@@ -221,6 +321,14 @@ class LangGraphTui:
     def _focused_panel(self) -> str:
         return self._panel_order[self._panel_focus_index]
 
+    def _color_attr(self, key: str, *, fallback: int = 0) -> int:
+        if not self._colors_enabled:
+            return fallback
+        pair = self._color_pairs.get(key)
+        if pair is None:
+            return fallback
+        return curses.color_pair(pair)
+
     def _cycle_focus(self, step: int) -> None:
         self._panel_focus_index = (self._panel_focus_index + step) % len(self._panel_order)
 
@@ -233,6 +341,28 @@ class LangGraphTui:
             if py <= y < py + pheight and px <= x < px + pwidth:
                 return panel_id
         return None
+
+    def _is_scrollbar_click(self, panel_id: str, y: int, x: int) -> bool:
+        region = self._scrollbar_regions.get(panel_id)
+        if region is None:
+            return False
+        track_x, track_y_start, inner_height, _ = region
+        return x == track_x and track_y_start <= y < track_y_start + inner_height
+
+    def _scroll_to_track_position(self, panel_id: str, y: int) -> None:
+        region = self._scrollbar_regions.get(panel_id)
+        if region is None:
+            return
+        track_x, track_y_start, inner_height, max_offset = region
+        del track_x
+        if inner_height <= 0:
+            return
+        rel = min(max(0, y - track_y_start), inner_height - 1)
+        if max_offset <= 0:
+            self._scroll_offsets[panel_id] = 0
+            return
+        normalized = 1.0 - (rel / max(1, inner_height - 1))
+        self._scroll_offsets[panel_id] = int(round(normalized * max_offset))
 
     def _scroll_focused(self, delta: int) -> None:
         panel = self._focused_panel()
@@ -298,6 +428,12 @@ class LangGraphTui:
             if panel is not None:
                 self._set_focus_panel(panel)
 
+            left_click_mask = (
+                getattr(curses, "BUTTON1_PRESSED", 0)
+                | getattr(curses, "BUTTON1_CLICKED", 0)
+                | getattr(curses, "BUTTON1_DOUBLE_CLICKED", 0)
+                | getattr(curses, "BUTTON1_TRIPLE_CLICKED", 0)
+            )
             wheel_up_mask = (
                 getattr(curses, "BUTTON4_PRESSED", 0)
                 | getattr(curses, "BUTTON4_CLICKED", 0)
@@ -317,6 +453,12 @@ class LangGraphTui:
 
             if button_state & wheel_down_mask:
                 self._scroll_focused(-3)
+                return
+
+            if panel is not None and button_state & left_click_mask and self._is_scrollbar_click(
+                panel, mouse_y, mouse_x
+            ):
+                self._scroll_to_track_position(panel, mouse_y)
                 return
 
             return
@@ -388,6 +530,7 @@ class LangGraphTui:
                         "payload": {"message": f"thread resolved: {self.thread_id}"},
                     }
                 )
+            self._hydrate_from_history()
             for event in stream_agent_events(
                 base_url=self.base_url,
                 application_id=self.application_id,
@@ -513,7 +656,7 @@ class LangGraphTui:
         height, width = screen.getmaxyx()
 
         composer_rows = 3
-        input_height = 2 + composer_rows
+        input_height = 1 + 1 + composer_rows + 2
         main_height = max(8, height - input_height)
         left_width = max(45, int(width * 0.65))
         right_width = width - left_width
@@ -526,6 +669,7 @@ class LangGraphTui:
         right_event_height = main_height - right_diag_height
 
         self._panel_regions.clear()
+        self._scrollbar_regions.clear()
 
         self._draw_panel(
             screen,
@@ -580,9 +724,8 @@ class LangGraphTui:
 
         prompt_lines = wrap_lines([self._input_buffer], width=max(1, width - 4))
         visible_prompt = prompt_lines[-composer_rows:] if prompt_lines else [""]
-        padded_prompt = [""] * (composer_rows - len(visible_prompt)) + visible_prompt
-        if len(prompt_lines) > composer_rows and padded_prompt:
-            padded_prompt[0] = f"...{padded_prompt[0]}"
+        if len(prompt_lines) > composer_rows and visible_prompt:
+            visible_prompt[0] = f"...{visible_prompt[0]}"
 
         focused = self._focused_panel()
         status = (
@@ -590,12 +733,29 @@ class LangGraphTui:
             f"profile={self.profile_id or '-'} | service={self.base_url} | focus={focused}"
         )
         status_row = main_height
-        screen.addnstr(status_row, 0, normalize_display_text(status).ljust(width), width - 1)
+        status_attr = self._color_attr("status")
+        screen.addnstr(
+            status_row,
+            0,
+            normalize_display_text(status).ljust(width),
+            width - 1,
+            status_attr,
+        )
 
-        prompt_start_row = status_row + 1
-        for idx in range(composer_rows):
+        input_label_row = status_row + 1
+        input_label = "Input (Ctrl+N newline, Enter send):"
+        screen.addnstr(
+            input_label_row,
+            0,
+            normalize_display_text(input_label).ljust(width),
+            width - 1,
+            status_attr,
+        )
+
+        prompt_start_row = input_label_row + 1
+        for idx, line in enumerate(visible_prompt[:composer_rows]):
             prefix = "> " if idx == 0 else "  "
-            prompt_line = f"{prefix}{padded_prompt[idx]}"
+            prompt_line = f"{prefix}{line}"
             screen.addnstr(
                 prompt_start_row + idx,
                 0,
@@ -603,14 +763,33 @@ class LangGraphTui:
                 width - 1,
             )
 
+        help_line_1 = "Navigation: Tab/Shift+Tab focus | Up/Down line scroll | PgUp/PgDn page scroll | Home/End jump"
+        help_line_2 = "Mouse: click panel focus | click scrollbar for fine scroll | wheel scroll | /clear | /quit"
+        help_attr = self._color_attr("help")
+        screen.addnstr(
+            height - 2,
+            0,
+            normalize_display_text(help_line_1).ljust(width),
+            width - 1,
+            help_attr,
+        )
         screen.addnstr(
             height - 1,
             0,
-            normalize_display_text(
-                "Enter=send Ctrl+N=newline Tab=next Shift+Tab=prev MouseWheel=scroll Click=focus /clear /quit"
-            ).ljust(width),
+            normalize_display_text(help_line_2).ljust(width),
             width - 1,
+            help_attr,
         )
+
+        # Place the cursor exactly where the user is typing.
+        cursor_line = visible_prompt[-1] if visible_prompt else ""
+        cursor_row = prompt_start_row + min(len(visible_prompt) - 1, composer_rows - 1)
+        cursor_col = min(width - 1, 2 + len(normalize_display_text(cursor_line)))
+        try:
+            screen.move(cursor_row, cursor_col)
+        except curses.error:
+            pass
+
         screen.refresh()
 
     def _draw_panel(
@@ -630,7 +809,16 @@ class LangGraphTui:
 
         self._panel_regions[panel_id] = (y, x, height, width)
         panel = screen.derwin(height, width, y, x)
+        focused = panel_id == self._focused_panel()
+        border_attr = self._color_attr("focused" if focused else panel_id)
+        text_attr = self._color_attr(panel_id)
+        track_attr = self._color_attr("scroll_track")
+        thumb_attr = self._color_attr("scroll_thumb")
+        if border_attr:
+            panel.attron(border_attr)
         panel.box()
+        if border_attr:
+            panel.attroff(border_attr)
 
         inner_height = height - 2
         inner_width = width - 2
@@ -647,16 +835,22 @@ class LangGraphTui:
         self._panel_page_sizes[panel_id] = max(1, inner_height - 1)
         self._scroll_offsets[panel_id] = min(self._scroll_offsets.get(panel_id, 0), max_offset)
 
-        focus_marker = "*" if panel_id == self._focused_panel() else " "
+        focus_marker = "*" if focused else " "
         offset = self._scroll_offsets.get(panel_id, 0)
         title_suffix = f" {offset}/{max_offset}" if max_offset > 0 else ""
         panel_title = normalize_display_text(f"{focus_marker}{title}{title_suffix}")
-        panel.addnstr(0, 2, panel_title[: max(1, width - 4)], max(1, width - 4))
+        panel.addnstr(
+            0,
+            2,
+            panel_title[: max(1, width - 4)],
+            max(1, width - 4),
+            border_attr,
+        )
 
         for row, text in enumerate(visible[:inner_height], start=1):
             safe_text = normalize_display_text(text)[:text_width]
             try:
-                panel.addnstr(row, 1, safe_text.ljust(text_width), text_width)
+                panel.addnstr(row, 1, safe_text.ljust(text_width), text_width, text_attr)
             except curses.error:
                 continue
 
@@ -669,15 +863,16 @@ class LangGraphTui:
                 thumb_size = min(thumb_size, inner_height)
                 normalized = offset / max_offset
                 thumb_top = int((inner_height - thumb_size) * (1 - normalized))
+            self._scrollbar_regions[panel_id] = (x + track_x, y + 1, inner_height, max_offset)
 
             for row in range(inner_height):
                 try:
-                    panel.addch(row + 1, track_x, ord("|"))
+                    panel.addch(row + 1, track_x, ord("|"), track_attr)
                 except curses.error:
                     continue
             for row in range(thumb_size):
                 try:
-                    panel.addch(thumb_top + row + 1, track_x, ord("#"))
+                    panel.addch(thumb_top + row + 1, track_x, ord("#"), thumb_attr)
                 except curses.error:
                     continue
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -58,6 +59,25 @@ class AgentStreamEvent(BaseModel):
     timestamp: datetime
 
 
+class ThreadHistoryEntry(BaseModel):
+    application_id: str
+    thread_id: str
+    profile_id: str | None
+    role: str
+    channel: str
+    content: str
+    run_id: str | None = None
+    trace_id: str | None = None
+    metadata: dict[str, Any]
+    created_at: datetime
+
+
+class ThreadHistoryResponse(BaseModel):
+    thread_id: str
+    entries: list[ThreadHistoryEntry]
+    count: int
+
+
 class RuntimeState:
     def __init__(self) -> None:
         self.postgres_pool: asyncpg.Pool | None = None
@@ -83,6 +103,29 @@ async def lifespan(_: FastAPI):
                 application_id TEXT UNIQUE NOT NULL,
                 created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
             )
+            """
+        )
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS thread_events (
+                id BIGSERIAL PRIMARY KEY,
+                application_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                profile_id TEXT,
+                role TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                content TEXT NOT NULL,
+                run_id TEXT,
+                trace_id TEXT,
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        await connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_thread_events_thread_created
+            ON thread_events(thread_id, created_at)
             """
         )
     await state.redis_client.ping()
@@ -114,6 +157,155 @@ def _build_event(
         payload=payload,
         timestamp=datetime.now(UTC),
     )
+
+
+async def _persist_history_entry(
+    *,
+    application_id: str,
+    thread_id: str,
+    profile_id: str | None,
+    role: str,
+    channel: str,
+    content: str,
+    run_id: str | None = None,
+    trace_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    created_at: datetime | None = None,
+) -> None:
+    captured_at = created_at or datetime.now(UTC)
+    metadata_payload = metadata or {}
+
+    if state.postgres_pool is not None:
+        try:
+            async with state.postgres_pool.acquire() as connection:
+                await connection.execute(
+                    """
+                    INSERT INTO thread_events(
+                        application_id, thread_id, profile_id, role, channel,
+                        content, run_id, trace_id, metadata, created_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+                    """,
+                    application_id,
+                    thread_id,
+                    profile_id,
+                    role,
+                    channel,
+                    content,
+                    run_id,
+                    trace_id,
+                    json.dumps(metadata_payload),
+                    captured_at,
+                )
+        except Exception:
+            pass
+
+    if state.redis_client is not None:
+        try:
+            key = f"thread:{thread_id}:history"
+            entry = {
+                "application_id": application_id,
+                "thread_id": thread_id,
+                "profile_id": profile_id,
+                "role": role,
+                "channel": channel,
+                "content": content,
+                "run_id": run_id,
+                "trace_id": trace_id,
+                "metadata": metadata_payload,
+                "created_at": captured_at.isoformat(),
+            }
+            await state.redis_client.rpush(key, json.dumps(entry))
+            await state.redis_client.ltrim(key, -500, -1)
+            await state.redis_client.set(
+                f"thread:{thread_id}:last_seen",
+                captured_at.isoformat(),
+            )
+        except Exception:
+            pass
+
+
+async def _fetch_thread_history(thread_id: str, limit: int = 200) -> list[dict[str, Any]]:
+    bounded_limit = max(1, min(limit, 1000))
+    collected: list[dict[str, Any]] = []
+
+    if state.postgres_pool is not None:
+        try:
+            async with state.postgres_pool.acquire() as connection:
+                rows = await connection.fetch(
+                    """
+                    SELECT application_id, thread_id, profile_id, role, channel,
+                           content, run_id, trace_id, metadata, created_at
+                    FROM thread_events
+                    WHERE thread_id = $1
+                    ORDER BY created_at DESC
+                    LIMIT $2
+                    """,
+                    thread_id,
+                    bounded_limit,
+                )
+            for row in reversed(rows):
+                metadata_value = row["metadata"] if isinstance(row["metadata"], dict) else {}
+                collected.append(
+                    {
+                        "application_id": str(row["application_id"]),
+                        "thread_id": str(row["thread_id"]),
+                        "profile_id": row["profile_id"],
+                        "role": str(row["role"]),
+                        "channel": str(row["channel"]),
+                        "content": str(row["content"]),
+                        "run_id": row["run_id"],
+                        "trace_id": row["trace_id"],
+                        "metadata": metadata_value,
+                        "created_at": row["created_at"],
+                    }
+                )
+        except Exception:
+            collected = []
+
+    if collected:
+        return collected
+
+    if state.redis_client is None:
+        return []
+
+    try:
+        payloads = await state.redis_client.lrange(f"thread:{thread_id}:history", -bounded_limit, -1)
+    except Exception:
+        return []
+
+    for raw in payloads:
+        try:
+            entry = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        created_raw = entry.get("created_at")
+        created_at = datetime.now(UTC)
+        if isinstance(created_raw, str):
+            try:
+                created_at = datetime.fromisoformat(created_raw)
+            except ValueError:
+                created_at = datetime.now(UTC)
+        metadata_value = entry.get("metadata")
+        if not isinstance(metadata_value, dict):
+            metadata_value = {}
+        collected.append(
+            {
+                "application_id": str(entry.get("application_id", "")),
+                "thread_id": str(entry.get("thread_id", thread_id)),
+                "profile_id": entry.get("profile_id"),
+                "role": str(entry.get("role", "system")),
+                "channel": str(entry.get("channel", "event")),
+                "content": str(entry.get("content", "")),
+                "run_id": entry.get("run_id"),
+                "trace_id": entry.get("trace_id"),
+                "metadata": metadata_value,
+                "created_at": created_at,
+            }
+        )
+    return collected
 
 
 def _chunk_text(text: str, chunk_size: int = 48) -> list[str]:
@@ -402,6 +594,17 @@ async def _agent_event_stream(request: AgentRunRequest) -> AsyncIterator[bytes]:
         payload={"message": "agent_run_started", "run": initial_run},
     )
     yield f"{initial.model_dump_json()}\n".encode()
+    await _persist_history_entry(
+        application_id=request.application_id,
+        thread_id=request.thread_id,
+        profile_id=request.profile_id,
+        role="user",
+        channel="transcript",
+        content=request.message,
+        run_id=run_id,
+        trace_id=trace_id,
+        metadata={"source": "agent_stream"},
+    )
 
     if state.agent_graph is None:
         message = "Agent graph not initialized"
@@ -422,6 +625,17 @@ async def _agent_event_stream(request: AgentRunRequest) -> AsyncIterator[bytes]:
             payload={"message": message, "run": run},
         )
         yield f"{error_event.model_dump_json()}\n".encode()
+        await _persist_history_entry(
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            profile_id=request.profile_id,
+            role="system",
+            channel="error",
+            content=message,
+            run_id=run_id,
+            trace_id=trace_id,
+            metadata={"run": run},
+        )
         return
 
     graph_payload = {
@@ -525,6 +739,17 @@ async def _agent_event_stream(request: AgentRunRequest) -> AsyncIterator[bytes]:
             payload={"message": message, "run": run},
         )
         yield f"{error_event.model_dump_json()}\n".encode()
+        await _persist_history_entry(
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            profile_id=request.profile_id,
+            role="system",
+            channel="error",
+            content=message,
+            run_id=run_id,
+            trace_id=trace_id,
+            metadata={"run": run},
+        )
         return
 
     answer_markdown = "".join(answer_parts)
@@ -575,6 +800,17 @@ async def _agent_event_stream(request: AgentRunRequest) -> AsyncIterator[bytes]:
                 payload={"message": error_message, "run": fallback_error_run},
             )
             yield f"{error_event.model_dump_json()}\n".encode()
+            await _persist_history_entry(
+                application_id=request.application_id,
+                thread_id=request.thread_id,
+                profile_id=request.profile_id,
+                role="system",
+                channel="error",
+                content=error_message,
+                run_id=run_id,
+                trace_id=trace_id,
+                metadata={"run": fallback_error_run},
+            )
             return
 
         for tool_message in fallback_tool_messages:
@@ -613,6 +849,40 @@ async def _agent_event_stream(request: AgentRunRequest) -> AsyncIterator[bytes]:
             payload={"message": "completed", "run": fallback_run},
         )
         yield f"{completion.model_dump_json()}\n".encode()
+        await _persist_history_entry(
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            profile_id=request.profile_id,
+            role="assistant",
+            channel="transcript",
+            content=fallback_answer,
+            run_id=run_id,
+            trace_id=trace_id,
+            metadata={"streamed": True},
+        )
+        if fallback_tool_messages:
+            await _persist_history_entry(
+                application_id=request.application_id,
+                thread_id=request.thread_id,
+                profile_id=request.profile_id,
+                role="assistant",
+                channel="reasoning",
+                content="\n\n".join(fallback_tool_messages),
+                run_id=run_id,
+                trace_id=trace_id,
+                metadata={"streamed": True},
+            )
+        await _persist_history_entry(
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            profile_id=request.profile_id,
+            role="system",
+            channel="diagnostics",
+            content="run_diagnostics",
+            run_id=run_id,
+            trace_id=trace_id,
+            metadata={"run": fallback_run},
+        )
         return
 
     selected_model = None
@@ -647,6 +917,40 @@ async def _agent_event_stream(request: AgentRunRequest) -> AsyncIterator[bytes]:
         payload={"message": "completed", "run": run},
     )
     yield f"{completion.model_dump_json()}\n".encode()
+    await _persist_history_entry(
+        application_id=request.application_id,
+        thread_id=request.thread_id,
+        profile_id=request.profile_id,
+        role="assistant",
+        channel="transcript",
+        content=answer_markdown,
+        run_id=run_id,
+        trace_id=trace_id,
+        metadata={"streamed": True},
+    )
+    if tool_messages:
+        await _persist_history_entry(
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            profile_id=request.profile_id,
+            role="assistant",
+            channel="reasoning",
+            content="\n\n".join(tool_messages),
+            run_id=run_id,
+            trace_id=trace_id,
+            metadata={"streamed": True},
+        )
+    await _persist_history_entry(
+        application_id=request.application_id,
+        thread_id=request.thread_id,
+        profile_id=request.profile_id,
+        role="system",
+        channel="diagnostics",
+        content="run_diagnostics",
+        run_id=run_id,
+        trace_id=trace_id,
+        metadata={"run": run},
+    )
 
     return
 
@@ -726,6 +1030,31 @@ async def create_or_get_thread(request: ThreadRequest) -> ThreadResponse:
     )
 
 
+@app.get("/threads/{thread_id}/history", response_model=ThreadHistoryResponse)
+async def get_thread_history(thread_id: str, limit: int = 200) -> ThreadHistoryResponse:
+    rows = await _fetch_thread_history(thread_id, limit=limit)
+    entries = [
+        ThreadHistoryEntry(
+            application_id=row["application_id"],
+            thread_id=row["thread_id"],
+            profile_id=row["profile_id"],
+            role=row["role"],
+            channel=row["channel"],
+            content=row["content"],
+            run_id=row["run_id"],
+            trace_id=row["trace_id"],
+            metadata=row["metadata"],
+            created_at=row["created_at"],
+        )
+        for row in rows
+    ]
+    return ThreadHistoryResponse(
+        thread_id=thread_id,
+        entries=entries,
+        count=len(entries),
+    )
+
+
 @app.post("/agent/runs", response_model=AgentRunResponse)
 async def run_agent(request: AgentRunRequest) -> AgentRunResponse:
     run_id = f"run_{uuid4()}"
@@ -736,6 +1065,51 @@ async def run_agent(request: AgentRunRequest) -> AgentRunResponse:
         run_id=run_id,
         trace_id=trace_id,
         started_at=started_at,
+    )
+    await _persist_history_entry(
+        application_id=request.application_id,
+        thread_id=request.thread_id,
+        profile_id=request.profile_id,
+        role="user",
+        channel="transcript",
+        content=request.message,
+        run_id=run_id,
+        trace_id=trace_id,
+        metadata={"source": "agent_runs"},
+    )
+    await _persist_history_entry(
+        application_id=request.application_id,
+        thread_id=request.thread_id,
+        profile_id=request.profile_id,
+        role="assistant",
+        channel="transcript",
+        content=answer_markdown,
+        run_id=run_id,
+        trace_id=trace_id,
+        metadata={"source": "agent_runs"},
+    )
+    if tool_messages:
+        await _persist_history_entry(
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            profile_id=request.profile_id,
+            role="assistant",
+            channel="reasoning",
+            content="\n\n".join(tool_messages),
+            run_id=run_id,
+            trace_id=trace_id,
+            metadata={"source": "agent_runs"},
+        )
+    await _persist_history_entry(
+        application_id=request.application_id,
+        thread_id=request.thread_id,
+        profile_id=request.profile_id,
+        role="system",
+        channel="diagnostics",
+        content="run_diagnostics",
+        run_id=run_id,
+        trace_id=trace_id,
+        metadata={"run": run},
     )
 
     return AgentRunResponse(

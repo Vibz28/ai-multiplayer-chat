@@ -41,6 +41,7 @@ The LangGraph service uses a hybrid model:
 
 - `POST /agent/runs`: single-shot response
 - `POST /agent/stream`: NDJSON event stream for backend relay
+- `GET /threads/{thread_id}/history`: persisted run/message history for CLI and frontend retrieval
 
 Event types emitted by `POST /agent/stream`:
 
@@ -55,6 +56,19 @@ Streaming behavior details:
 - `content` events are emitted from live `on_chat_model_stream` token chunks (incremental, not post-hoc chunking).
 - `reasoning` events are emitted from tool outputs (`on_tool_end`) when the agent actually invokes tools.
 - If a run completes without tool invocations, reasoning panes should remain empty by design (`tool_message_count=0`).
+
+## Persistence and Retrieval
+
+Conversation artifacts are persisted server-side so clients are not dependent on local JSON logs:
+
+- Postgres:
+  - `threads` table for thread registration
+  - `thread_events` table for transcript entries, reasoning output, diagnostics, and errors
+- Redis:
+  - rolling cache list at `thread:{thread_id}:history`
+  - last-seen timestamp at `thread:{thread_id}:last_seen`
+
+The TUI hydrates prior history via `GET /threads/{thread_id}/history` when reconnecting to an existing thread.
 
 Each stream event may include `payload.run` diagnostics with LangSmith-style fields:
 
