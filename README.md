@@ -40,6 +40,7 @@ Work is delivered in phased feature branches and merged to `main` after validati
 - `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/docs/PHASE_PLAN.md`
 - `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/docs/ARCHITECTURE_DECISIONS.md`
 - `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/docs/LANGGRAPH_AGENT_REQUIREMENTS.md`
+- `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/docs/FRONTEND_EVENT_CONTRACT.md`
 
 ## LangGraph TUI CLI
 
@@ -69,3 +70,19 @@ The TUI supports:
 - DynamoDB remains metadata-focused for application session mapping:
   - `application_id`, `profile_id`, `role`, `langgraph_thread_id`
   - workflow metadata (`workflow_id`, `langsmith_trace_id`)
+
+## Frontend (Phase 3)
+
+Run locally:
+
+- `cd frontend && bun install`
+- `cd frontend && bun run dev`
+
+Phase 3 frontend capabilities:
+
+- multi-user session simulation (many participants on one `application_id`)
+- user-to-user/direct and user-to-group messaging
+- user-to-AI and multi-user concurrent AI prompts with queued/generating/reasoning/completed indicators
+- live transcript and event trace panels for WebSocket debugging
+- Markdown rendering with Mermaid rendering + fallback handling
+- light and dark themes (toggle in UI, preference persisted locally)

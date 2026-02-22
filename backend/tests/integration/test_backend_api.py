@@ -92,7 +92,10 @@ class InMemoryLangGraphClient:
         yield {
             "type": "complete",
             "stream_state": "completed",
-            "payload": {"message": "completed"},
+            "payload": {
+                "message": "completed",
+                "run": {"run_id": "run_fake", "trace_id": "trace_fake"},
+            },
         }
 
 
@@ -162,13 +165,17 @@ def test_websocket_event_channels_are_distinct() -> None:
 
             websocket.send_json({"type": "user_message", "content": "hello"})
 
+            user_event = websocket.receive_json()
             status_event = websocket.receive_json()
             preflight_event = websocket.receive_json()
             reasoning_event = websocket.receive_json()
             content_event = websocket.receive_json()
             complete_event = websocket.receive_json()
 
+            assert user_event["type"] == "user_message"
+            assert user_event["payload"]["content"] == "hello"
             assert status_event["type"] == "status"
+            assert status_event["payload"]["message"] == "agent_run_started"
             assert preflight_event["type"] == "status"
             assert preflight_event["payload"]["message"] == "langgraph_preflight"
             assert reasoning_event["type"] == "reasoning"
@@ -196,7 +203,7 @@ def test_history_endpoint_reads_canonical_langgraph_history() -> None:
         with client.websocket_connect(f"/ws/{application_id}") as websocket:
             websocket.receive_json()  # connection
             websocket.send_json({"type": "user_message", "content": "history test"})
-            for _ in range(5):
+            for _ in range(6):
                 websocket.receive_json()
 
         history_response = client.get(f"/v1/sessions/{application_id}/history?limit=50")
@@ -209,5 +216,65 @@ def test_history_endpoint_reads_canonical_langgraph_history() -> None:
         roles = {entry["role"] for entry in payload["entries"]}
         assert "user" in roles
         assert "assistant" in roles
+
+        session_response = client.get(f"/v1/sessions/{application_id}")
+        assert session_response.status_code == 200
+        session_payload = session_response.json()
+        assert session_payload["workflow_id"] == "run_fake"
+        assert session_payload["langsmith_trace_id"] == "trace_fake"
+
+    app.dependency_overrides.clear()
+
+
+def test_direct_user_to_user_message_only_targets_profiles() -> None:
+    with build_test_client() as client:
+        create_response = client.post("/v1/sessions", json={"profile_id": "host", "role": "member"})
+        application_id = create_response.json()["application_id"]
+        client.post(f"/v1/sessions/{application_id}/thread")
+
+        with client.websocket_connect(f"/ws/{application_id}") as ws_a:
+            ws_a.receive_json()  # connection
+            ws_a.send_json({"type": "join", "profile_id": "alice", "role": "member"})
+            ws_a.receive_json()  # participant_join
+
+            with client.websocket_connect(f"/ws/{application_id}") as ws_b:
+                ws_b.receive_json()  # connection
+                ws_b.send_json({"type": "join", "profile_id": "bob", "role": "member"})
+                ws_b.receive_json()  # participant_join broadcast
+                ws_a.receive_json()  # participant_join broadcast for alice socket
+
+                ws_a.send_json(
+                    {
+                        "type": "user_message",
+                        "content": "private hi",
+                        "profile_id": "alice",
+                        "delivery_mode": "direct",
+                        "recipient_profile_ids": ["bob"],
+                        "include_ai": False,
+                    }
+                )
+
+                event_for_alice = None
+                event_for_bob = None
+                for _ in range(6):
+                    if event_for_alice is None:
+                        candidate = ws_a.receive_json()
+                        if candidate["type"] == "user_message":
+                            event_for_alice = candidate
+                    if event_for_bob is None:
+                        candidate = ws_b.receive_json()
+                        if candidate["type"] == "user_message":
+                            event_for_bob = candidate
+                    if event_for_alice is not None and event_for_bob is not None:
+                        break
+
+                assert event_for_alice is not None
+                assert event_for_bob is not None
+                assert event_for_alice["type"] == "user_message"
+                assert event_for_bob["type"] == "user_message"
+                assert event_for_alice["payload"]["delivery_mode"] == "direct"
+                assert event_for_bob["payload"]["delivery_mode"] == "direct"
+                assert event_for_alice["payload"]["include_ai"] is False
+                assert event_for_bob["payload"]["include_ai"] is False
 
     app.dependency_overrides.clear()

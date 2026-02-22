@@ -159,8 +159,17 @@ async def websocket_chat(
         await websocket.close(code=1008, reason="Unknown application_id")
         return
 
+    default_profile = existing.profile_id or "anonymous"
+    default_role = existing.role or "member"
     await hub.connect(application_id, websocket)
+    participant = await hub.set_participant(
+        application_id,
+        websocket,
+        profile_id=default_profile,
+        role=default_role,
+    )
     try:
+        participants = await hub.participants_snapshot(application_id)
         await hub.emit(
             application_id,
             normalize_event(
@@ -168,7 +177,12 @@ async def websocket_chat(
                 application_id=application_id,
                 thread_id=existing.langgraph_thread_id,
                 stream_state="connected",
-                payload={"message": "connected"},
+                payload={
+                    "message": "connected",
+                    "profile_id": participant.profile_id,
+                    "role": participant.role,
+                    "participants": participants,
+                },
             ),
         )
 
@@ -187,11 +201,53 @@ async def websocket_chat(
                 )
                 continue
 
+            if inbound.type == "join":
+                participant = await hub.set_participant(
+                    application_id,
+                    websocket,
+                    profile_id=inbound.profile_id or participant.profile_id,
+                    role=inbound.role or participant.role,
+                )
+                participants = await hub.participants_snapshot(application_id)
+                await hub.emit(
+                    application_id,
+                    normalize_event(
+                        event_type="participant_join",
+                        application_id=application_id,
+                        thread_id=existing.langgraph_thread_id,
+                        stream_state="idle",
+                        payload={
+                            "profile_id": participant.profile_id,
+                            "role": participant.role,
+                            "participants": participants,
+                        },
+                    ),
+                )
+                continue
+
+            if inbound.type == "leave":
+                await hub.emit(
+                    application_id,
+                    normalize_event(
+                        event_type="participant_leave",
+                        application_id=application_id,
+                        thread_id=existing.langgraph_thread_id,
+                        stream_state="idle",
+                        payload={
+                            "profile_id": participant.profile_id,
+                            "role": participant.role,
+                            "message": "participant requested disconnect",
+                        },
+                    ),
+                )
+                break
+
             if inbound.type == "ping":
                 try:
                     snapshot = await langgraph_client.status_snapshot()
                 except LangGraphClientError:
                     snapshot = {"status": "unreachable"}
+                participants = await hub.participants_snapshot(application_id)
                 await hub.emit(
                     application_id,
                     normalize_event(
@@ -199,7 +255,11 @@ async def websocket_chat(
                         application_id=application_id,
                         thread_id=existing.langgraph_thread_id,
                         stream_state="idle",
-                        payload={"message": "pong", "snapshot": snapshot},
+                        payload={
+                            "message": "pong",
+                            "snapshot": snapshot,
+                            "participants": participants,
+                        },
                     ),
                 )
                 continue
@@ -215,6 +275,23 @@ async def websocket_chat(
                 )
                 continue
 
+            participant = await hub.set_participant(
+                application_id,
+                websocket,
+                profile_id=inbound.profile_id or participant.profile_id,
+                role=inbound.role or participant.role,
+            )
+            sender_profile = participant.profile_id
+            sender_role = participant.role
+            recipient_profiles = {
+                profile_id.strip()
+                for profile_id in inbound.recipient_profile_ids
+                if profile_id and profile_id.strip()
+            }
+            is_direct = inbound.delivery_mode == "direct" and bool(recipient_profiles)
+            target_profiles = set(recipient_profiles)
+            target_profiles.add(sender_profile)
+
             try:
                 mapping = await service.ensure_thread(application_id)
             except LangGraphClientError as exc:
@@ -228,18 +305,33 @@ async def websocket_chat(
                 )
                 continue
 
-            await hub.emit(
-                application_id,
-                normalize_event(
-                    event_type="status",
-                    application_id=application_id,
-                    thread_id=mapping.langgraph_thread_id,
-                    stream_state="generating",
-                    payload={"message": "queued"},
-                ),
+            user_message_event = normalize_event(
+                event_type="user_message",
+                application_id=application_id,
+                thread_id=mapping.langgraph_thread_id,
+                stream_state="idle",
+                payload={
+                    "content": inbound.content,
+                    "profile_id": sender_profile,
+                    "role": sender_role,
+                    "include_ai": inbound.include_ai,
+                    "delivery_mode": inbound.delivery_mode,
+                    "recipient_profile_ids": sorted(recipient_profiles),
+                },
             )
-            try:
-                preflight = await langgraph_client.status_snapshot()
+            if is_direct:
+                await hub.emit_to_profiles(
+                    application_id,
+                    user_message_event,
+                    profile_ids=target_profiles,
+                )
+            else:
+                await hub.emit(application_id, user_message_event)
+
+            if not inbound.include_ai:
+                continue
+
+            if await hub.generation_busy(application_id):
                 await hub.emit(
                     application_id,
                     normalize_event(
@@ -247,10 +339,15 @@ async def websocket_chat(
                         application_id=application_id,
                         thread_id=mapping.langgraph_thread_id,
                         stream_state="generating",
-                        payload={"message": "langgraph_preflight", "snapshot": preflight},
+                        payload={
+                            "message": "queued_for_agent",
+                            "profile_id": sender_profile,
+                            "delivery_mode": inbound.delivery_mode,
+                        },
                     ),
                 )
-            except LangGraphClientError:
+
+            async with hub.generation_guard(application_id):
                 await hub.emit(
                     application_id,
                     normalize_event(
@@ -258,61 +355,121 @@ async def websocket_chat(
                         application_id=application_id,
                         thread_id=mapping.langgraph_thread_id,
                         stream_state="generating",
-                        payload={"message": "langgraph_preflight_failed"},
+                        payload={
+                            "message": "agent_run_started",
+                            "profile_id": sender_profile,
+                            "delivery_mode": inbound.delivery_mode,
+                        },
                     ),
                 )
-
-            try:
-                async for upstream_event in langgraph_client.stream_agent_run(
-                    application_id=application_id,
-                    thread_id=mapping.langgraph_thread_id,
-                    profile_id=existing.profile_id,
-                    message=inbound.content,
-                ):
-                    upstream_type = str(upstream_event.get("type", "status"))
-                    upstream_state = str(upstream_event.get("stream_state", "generating"))
-                    upstream_payload = upstream_event.get("payload", {})
-                    if not isinstance(upstream_payload, dict):
-                        upstream_payload = {"value": upstream_payload}
-
-                    run_payload = upstream_payload.get("run")
-                    if isinstance(run_payload, dict):
-                        workflow_id = run_payload.get("run_id")
-                        trace_id = run_payload.get("trace_id")
-                        safe_workflow = workflow_id if isinstance(workflow_id, str) else None
-                        safe_trace = trace_id if isinstance(trace_id, str) else None
-                        if safe_workflow is not None or safe_trace is not None:
-                            try:
-                                await run_in_threadpool(
-                                    repository.upsert_workflow_metadata,
-                                    application_id,
-                                    safe_workflow,
-                                    safe_trace,
-                                )
-                            except Exception:
-                                pass
-
+                try:
+                    preflight = await langgraph_client.status_snapshot()
                     await hub.emit(
                         application_id,
                         normalize_event(
+                            event_type="status",
+                            application_id=application_id,
+                            thread_id=mapping.langgraph_thread_id,
+                            stream_state="generating",
+                            payload={
+                                "message": "langgraph_preflight",
+                                "snapshot": preflight,
+                                "profile_id": sender_profile,
+                            },
+                        ),
+                    )
+                except LangGraphClientError:
+                    await hub.emit(
+                        application_id,
+                        normalize_event(
+                            event_type="status",
+                            application_id=application_id,
+                            thread_id=mapping.langgraph_thread_id,
+                            stream_state="generating",
+                            payload={
+                                "message": "langgraph_preflight_failed",
+                                "profile_id": sender_profile,
+                            },
+                        ),
+                    )
+
+                try:
+                    async for upstream_event in langgraph_client.stream_agent_run(
+                        application_id=application_id,
+                        thread_id=mapping.langgraph_thread_id,
+                        profile_id=sender_profile,
+                        message=inbound.content,
+                    ):
+                        upstream_type = str(upstream_event.get("type", "status"))
+                        upstream_state = str(upstream_event.get("stream_state", "generating"))
+                        upstream_payload = upstream_event.get("payload", {})
+                        if not isinstance(upstream_payload, dict):
+                            upstream_payload = {"value": upstream_payload}
+                        upstream_payload.setdefault("initiated_by_profile_id", sender_profile)
+                        upstream_payload.setdefault("delivery_mode", inbound.delivery_mode)
+                        upstream_payload.setdefault(
+                            "recipient_profile_ids",
+                            sorted(recipient_profiles),
+                        )
+
+                        run_payload = upstream_payload.get("run")
+                        if isinstance(run_payload, dict):
+                            workflow_id = run_payload.get("run_id")
+                            trace_id = run_payload.get("trace_id")
+                            safe_workflow = workflow_id if isinstance(workflow_id, str) else None
+                            safe_trace = trace_id if isinstance(trace_id, str) else None
+                            if safe_workflow is not None or safe_trace is not None:
+                                try:
+                                    await run_in_threadpool(
+                                        repository.upsert_workflow_metadata,
+                                        application_id,
+                                        safe_workflow,
+                                        safe_trace,
+                                    )
+                                except Exception:
+                                    pass
+
+                        stream_event = normalize_event(
                             event_type=upstream_type,
                             application_id=application_id,
                             thread_id=mapping.langgraph_thread_id,
                             stream_state=upstream_state,
                             payload=upstream_payload,
+                        )
+                        if is_direct:
+                            await hub.emit_to_profiles(
+                                application_id,
+                                stream_event,
+                                profile_ids=target_profiles,
+                            )
+                        else:
+                            await hub.emit(application_id, stream_event)
+                except LangGraphClientError as exc:
+                    await hub.emit(
+                        application_id,
+                        normalize_event(
+                            event_type="error",
+                            application_id=application_id,
+                            thread_id=mapping.langgraph_thread_id,
+                            stream_state="error",
+                            payload={"message": str(exc)},
                         ),
                     )
-            except LangGraphClientError as exc:
-                await hub.emit(
-                    application_id,
-                    normalize_event(
-                        event_type="error",
-                        application_id=application_id,
-                        thread_id=mapping.langgraph_thread_id,
-                        stream_state="error",
-                        payload={"message": str(exc)},
-                    ),
-                )
-                continue
+                    continue
     except WebSocketDisconnect:
+        await hub.emit(
+            application_id,
+            normalize_event(
+                event_type="participant_leave",
+                application_id=application_id,
+                thread_id=existing.langgraph_thread_id,
+                stream_state="idle",
+                payload={
+                    "profile_id": participant.profile_id,
+                    "role": participant.role,
+                    "message": "disconnected",
+                },
+            ),
+        )
+    finally:
         await hub.disconnect(application_id, websocket)
