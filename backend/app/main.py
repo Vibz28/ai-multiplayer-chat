@@ -4,9 +4,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
 
-from app.config import get_settings
+from app.config import get_settings, parse_cors_origins
 from app.dependencies import (
     get_checklist_service,
     get_history_service,
@@ -45,6 +46,13 @@ async def lifespan(application: FastAPI):
 
 settings = get_settings()
 app = FastAPI(title=settings.api_title, lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=parse_cors_origins(settings.cors_allowed_origins),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 def _session_response(record) -> SessionResponse:

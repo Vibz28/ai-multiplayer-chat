@@ -164,6 +164,23 @@ def test_rest_session_and_thread_resolution() -> None:
     app.dependency_overrides.clear()
 
 
+def test_cors_preflight_for_session_creation() -> None:
+    with build_test_client() as client:
+        response = client.options(
+            "/v1/sessions",
+            headers={
+                "Origin": "http://localhost:5173",
+                "Access-Control-Request-Method": "POST",
+                "Access-Control-Request-Headers": "content-type",
+            },
+        )
+        assert response.status_code == 200
+        assert response.headers["access-control-allow-origin"] == "http://localhost:5173"
+        allowed_methods = response.headers["access-control-allow-methods"]
+        assert "POST" in allowed_methods
+    app.dependency_overrides.clear()
+
+
 def test_websocket_event_channels_are_distinct() -> None:
     with build_test_client() as client:
         create_response = client.post("/v1/sessions", json={"profile_id": "beta"})
