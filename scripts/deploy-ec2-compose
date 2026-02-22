@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<USAGE
+Usage: scripts/deploy-ec2-compose [--dry-run]
+
+Required env:
+  EC2_HOST
+
+Optional env:
+  EC2_USER              (default: ec2-user)
+  EC2_APP_DIR           (default: /opt/ai-multiplayer-chat)
+  DRY_RUN               (1/true/yes also enables dry-run)
+USAGE
+}
+
+dry_run=false
+case "${1:-}" in
+  --help|-h)
+    usage
+    exit 0
+    ;;
+  --dry-run)
+    dry_run=true
+    shift
+    ;;
+esac
+case "${DRY_RUN:-}" in
+  1|true|TRUE|yes|YES) dry_run=true ;;
+esac
+
+remote_host="${EC2_HOST:-}"
+if [[ -z "$remote_host" ]]; then
+  echo "EC2_HOST is required" >&2
+  exit 1
+fi
+remote_user="${EC2_USER:-ec2-user}"
+remote_dir="${EC2_APP_DIR:-/opt/ai-multiplayer-chat}"
+
+ssh_target="${remote_user}@${remote_host}"
+
+if $dry_run; then
+  echo "[dry-run] ssh \"$ssh_target\" 'cd \"$remote_dir\" && ./scripts/stack up'"
+else
+  ssh "$ssh_target" "
+    set -euo pipefail
+    cd '$remote_dir'
+    ./scripts/stack up
+  "
+fi
+
+echo "Remote stack refreshed on ${ssh_target}:${remote_dir}"

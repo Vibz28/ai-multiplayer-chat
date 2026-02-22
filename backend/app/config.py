@@ -15,6 +15,7 @@ class Settings(BaseSettings):
 
     langgraph_service_url: str = "http://langgraph-service:8080"
     application_id_prefix: str = "app"
+    cors_allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     model_config = SettingsConfigDict(
         env_prefix="BACKEND_",
@@ -27,3 +28,7 @@ class Settings(BaseSettings):
 @lru_cache
 def get_settings() -> Settings:
     return Settings()
+
+
+def parse_cors_origins(raw_origins: str) -> list[str]:
+    return [origin.strip() for origin in raw_origins.split(",") if origin.strip()]

@@ -2,6 +2,7 @@ from functools import lru_cache
 
 from app.config import get_settings
 from app.repositories.mapping_repository import DynamoDBMappingRepository
+from app.services.checklist_service import CanonicalChecklistService
 from app.services.history_service import CanonicalHistoryService
 from app.services.langgraph_client import LangGraphClient
 from app.services.session_service import SessionService
@@ -39,6 +40,14 @@ def get_session_service() -> SessionService:
 @lru_cache
 def get_history_service() -> CanonicalHistoryService:
     return CanonicalHistoryService(
+        mapping_repository=get_mapping_repository(),
+        langgraph_client=get_langgraph_client(),
+    )
+
+
+@lru_cache
+def get_checklist_service() -> CanonicalChecklistService:
+    return CanonicalChecklistService(
         mapping_repository=get_mapping_repository(),
         langgraph_client=get_langgraph_client(),
     )

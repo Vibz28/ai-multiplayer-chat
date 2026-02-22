@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import sys
 import types
-import typing
-from datetime import datetime
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
@@ -29,12 +27,9 @@ config_spec.loader.exec_module(config_module)
 previous_app = sys.modules.get("app")
 previous_app_agent = sys.modules.get("app.agent")
 previous_app_config = sys.modules.get("app.config")
-if previous_app is None:
-    app_module = types.ModuleType("app")
-    app_module.__path__ = [str(service_root / "app")]  # type: ignore[attr-defined]
-    sys.modules["app"] = app_module
-else:
-    app_module = previous_app
+app_module = types.ModuleType("app")
+app_module.__path__ = [str(service_root / "app")]  # type: ignore[attr-defined]
+sys.modules["app"] = app_module
 
 sys.modules["app.agent"] = agent_module
 sys.modules["app.config"] = config_module
@@ -46,11 +41,10 @@ if main_spec is None or main_spec.loader is None:
     raise RuntimeError("Unable to load langgraph_service main module")
 main_module = module_from_spec(main_spec)
 main_spec.loader.exec_module(main_module)
-main_module.AgentStreamEvent.model_rebuild(
-    _types_namespace={"Any": typing.Any, "datetime": datetime}
-)
 
-if previous_app is None:
+if previous_app is not None:
+    sys.modules["app"] = previous_app
+else:
     sys.modules.pop("app", None)
 if previous_app_agent is not None:
     sys.modules["app.agent"] = previous_app_agent
@@ -158,6 +152,7 @@ async def test_agent_stream_emits_reasoning_content_and_complete() -> None:
 
     assert events[0]["type"] == "status"
     assert events[0]["stream_state"] == "queued"
+    assert events[1]["type"] == "checklist"
     assert [event["type"] for event in events][-1] == "complete"
     assert "run_id" in events[0]["payload"]["run"]
     assert events[0]["payload"]["run"]["status"] == "running"
@@ -193,8 +188,8 @@ async def test_agent_stream_emits_error_event_on_failure() -> None:
     finally:
         state.agent_graph = original_graph
 
-    assert [event["type"] for event in events] == ["status", "error"]
-    assert events[1]["stream_state"] == "error"
-    assert "Agent stream failed" in events[1]["payload"]["message"]
-    assert events[1]["payload"]["run"]["status"] == "error"
-    assert events[1]["payload"]["run"]["error"] is not None
+    assert [event["type"] for event in events] == ["status", "checklist", "error"]
+    assert events[2]["stream_state"] == "error"
+    assert "Agent stream failed" in events[2]["payload"]["message"]
+    assert events[2]["payload"]["run"]["status"] == "error"
+    assert events[2]["payload"]["run"]["error"] is not None

@@ -40,6 +40,25 @@ Work is delivered in phased feature branches and merged to `main` after validati
 - `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/docs/PHASE_PLAN.md`
 - `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/docs/ARCHITECTURE_DECISIONS.md`
 - `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/docs/LANGGRAPH_AGENT_REQUIREMENTS.md`
+- `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/docs/FRONTEND_EVENT_CONTRACT.md`
+- `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/docs/DEPLOYMENT_WORKFLOW.md`
+
+## Stack Operations
+
+Use the script-first workflow:
+
+- `scripts/stack up`
+- `scripts/stack smoke`
+- `scripts/stack logs backend`
+- `STACK_LOG_FOLLOW=0 scripts/stack logs backend`
+- `scripts/stack down`
+
+AWS publish/deploy helpers:
+
+- `scripts/publish-ecr`
+- `scripts/deploy-ecs`
+- `scripts/deploy-ec2-compose`
+- all support safe previews via `DRY_RUN=1 ...`
 
 ## LangGraph TUI CLI
 
@@ -69,3 +88,20 @@ The TUI supports:
 - DynamoDB remains metadata-focused for application session mapping:
   - `application_id`, `profile_id`, `role`, `langgraph_thread_id`
   - workflow metadata (`workflow_id`, `langsmith_trace_id`)
+
+## Frontend (Phase 3)
+
+Run locally:
+
+- `cd frontend && bun install`
+- `cd frontend && bun run dev`
+- `cd frontend && bun run check` (pre-merge: lint, test, build, then type-check)
+
+Phase 3 frontend capabilities:
+
+- multi-user session simulation (many participants on one `application_id`)
+- user-to-user/direct and user-to-group messaging
+- user-to-AI and multi-user concurrent AI prompts with queued/generating/reasoning/completed indicators
+- live transcript and event trace panels for WebSocket debugging
+- Markdown rendering with Mermaid rendering + fallback handling
+- light and dark themes (toggle in UI, preference persisted locally)

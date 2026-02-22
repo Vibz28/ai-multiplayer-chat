@@ -26,14 +26,37 @@ Service/runtime dependencies:
 
 The LangGraph service uses a hybrid model:
 
-- Graph orchestration via LangGraph (`create_react_agent` compiled graph)
-- Autonomous tool-call execution via LangChain tools
+- Graph orchestration via LangGraph state graph nodes
+- Autonomous ReAct-style tool-call execution via LangChain `create_agent` (LangChain v1 API)
+- Workflow hooks around the autonomous node:
+  - pre-node: prompt/context preparation
+  - autonomous node: dynamic tool usage loop
+  - post-node: finalize pipeline stage
 - Model fallback chain for robustness:
   - primary: `kimi-k2.5:cloud`
   - first fallback: `qwen3-vl:235b-cloud`
   - second fallback: `gpt-oss:20b` (local Ollama)
+- Agent tooling includes:
+  - `get_utc_time`
+  - `add_numbers`
+  - `describe_session_context`
+  - `manage_checklist` (thread-scoped dynamic checklist maintenance tool)
 - Persistent thread registration via Postgres
 - Runtime heartbeat/session side-channel via Redis
+
+## Prompt Management (LangSmith Hub Compatible)
+
+The system prompt is managed as a LangSmith/LangChain-serializable YAML manifest:
+
+- local manifest path:
+  - `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/langgraph_service/agent_prompts/system_prompt.yaml`
+
+Runtime loading order:
+
+1. If `LANGGRAPH_AGENT_PROMPT_HUB_IDENTIFIER` is set, try `langsmith.Client.pull_prompt(...)`.
+2. On pull failure or when unset, load the local YAML manifest fallback.
+
+The YAML format is Hub-compatible (`lc/type/id/kwargs` manifest shape) and can be pushed/pulled through LangSmith Prompt Hub workflows.
 
 ## Streaming Contract
 
@@ -42,6 +65,7 @@ The LangGraph service uses a hybrid model:
 - `POST /agent/runs`: single-shot response
 - `POST /agent/stream`: NDJSON event stream for backend relay
 - `GET /threads/{thread_id}/history`: persisted run/message history for CLI and frontend retrieval
+- `GET /threads/{thread_id}/checklist`: structured checklist items maintained by `manage_checklist`
 
 Event types emitted by `POST /agent/stream`:
 
@@ -97,7 +121,9 @@ LangGraph CLI graph config:
 - `LANGGRAPH_OLLAMA_FALLBACK_CLOUD_MODEL`
 - `LANGGRAPH_OLLAMA_FALLBACK_LOCAL_BASE_URL`
 - `LANGGRAPH_OLLAMA_FALLBACK_LOCAL_MODEL`
-- `LANGGRAPH_AGENT_SYSTEM_PROMPT`
+- `LANGGRAPH_AGENT_PROMPT_MANIFEST_PATH`
+- `LANGGRAPH_AGENT_PROMPT_HUB_IDENTIFIER` (optional)
+- `LANGGRAPH_AGENT_SYSTEM_PROMPT_FALLBACK`
 - `LANGGRAPH_LANGSMITH_TRACING`
 - `LANGGRAPH_LANGSMITH_PROJECT`
 - `LANGSMITH_API_KEY`

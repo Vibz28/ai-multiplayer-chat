@@ -13,7 +13,9 @@ class Settings(BaseSettings):
     ollama_fallback_cloud_model: str = "qwen3-vl:235b-cloud"
     ollama_fallback_local_base_url: str = "http://host.docker.internal:11434"
     ollama_fallback_local_model: str = "gpt-oss:20b"
-    agent_system_prompt: str = (
+    agent_prompt_manifest_path: str = "agent_prompts/system_prompt.yaml"
+    agent_prompt_hub_identifier: str | None = None
+    agent_system_prompt_fallback: str = (
         "You are the orchestration agent for a multi-service chat platform. "
         "Use tools when they improve correctness, especially for math, time, and session context. "
         "Return concise Markdown."

@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+usage() {
+  cat <<USAGE
+Usage: scripts/publish-ecr [--dry-run]
+
+Environment:
+  AWS_REGION          AWS region (default: us-east-1)
+  AWS_ACCOUNT_ID      AWS account ID (auto-discovered when omitted, except dry-run)
+  IMAGE_TAG           Tag to publish (default: current git short SHA)
+  ECR_REPO_PREFIX     ECR repository prefix (default: ai-multiplayer-chat)
+  DRY_RUN             Set to 1/true/yes to print commands without executing
+USAGE
+}
+
+dry_run=false
+case "${1:-}" in
+  --help|-h)
+    usage
+    exit 0
+    ;;
+  --dry-run)
+    dry_run=true
+    shift
+    ;;
+esac
+case "${DRY_RUN:-}" in
+  1|true|TRUE|yes|YES) dry_run=true ;;
+esac
+
+run_cmd() {
+  if $dry_run; then
+    printf '[dry-run] '
+    printf '%q ' "$@"
+    printf '\n'
+    return 0
+  fi
+  "$@"
+}
+
+region="${AWS_REGION:-us-east-1}"
+account_id="${AWS_ACCOUNT_ID:-}"
+if [[ -z "$account_id" ]]; then
+  if $dry_run; then
+    account_id="000000000000"
+  else
+    account_id="$(aws sts get-caller-identity --query Account --output text)"
+  fi
+fi
+image_tag="${IMAGE_TAG:-$(cd "$repo_root" && git rev-parse --short HEAD)}"
+repo_prefix="${ECR_REPO_PREFIX:-ai-multiplayer-chat}"
+
+registry="${account_id}.dkr.ecr.${region}.amazonaws.com"
+
+backend_repo="${repo_prefix}/backend"
+langgraph_repo="${repo_prefix}/langgraph-service"
+frontend_repo="${repo_prefix}/frontend"
+
+ensure_repo() {
+  local repo_name="$1"
+  if $dry_run; then
+    run_cmd aws ecr describe-repositories --region "$region" --repository-names "$repo_name"
+    run_cmd aws ecr create-repository --region "$region" --repository-name "$repo_name"
+    return
+  fi
+  aws ecr describe-repositories --region "$region" --repository-names "$repo_name" >/dev/null 2>&1 || \
+    aws ecr create-repository --region "$region" --repository-name "$repo_name" >/dev/null
+}
+
+push_image() {
+  local local_image="$1"
+  local remote_image="$2"
+  run_cmd docker tag "$local_image" "$remote_image"
+  run_cmd docker push "$remote_image"
+}
+
+ensure_repo "$backend_repo"
+ensure_repo "$langgraph_repo"
+ensure_repo "$frontend_repo"
+
+if $dry_run; then
+  run_cmd aws ecr get-login-password --region "$region"
+  run_cmd docker login --username AWS --password-stdin "$registry"
+else
+  aws ecr get-login-password --region "$region" | docker login --username AWS --password-stdin "$registry"
+fi
+
+if $dry_run; then
+  echo "[dry-run] cd \"$repo_root\" && BACKEND_IMAGE=\"ai-multiplayer-chat/backend:local\" LANGGRAPH_IMAGE=\"ai-multiplayer-chat/langgraph-service:local\" FRONTEND_IMAGE=\"ai-multiplayer-chat/frontend:local\" docker compose -f compose.yaml build backend langgraph-service frontend"
+else
+  (
+    cd "$repo_root"
+    BACKEND_IMAGE="ai-multiplayer-chat/backend:local" \
+    LANGGRAPH_IMAGE="ai-multiplayer-chat/langgraph-service:local" \
+    FRONTEND_IMAGE="ai-multiplayer-chat/frontend:local" \
+    docker compose -f compose.yaml build backend langgraph-service frontend
+  )
+fi
+
+push_image "ai-multiplayer-chat/backend:local" "${registry}/${backend_repo}:${image_tag}"
+push_image "ai-multiplayer-chat/langgraph-service:local" "${registry}/${langgraph_repo}:${image_tag}"
+push_image "ai-multiplayer-chat/frontend:local" "${registry}/${frontend_repo}:${image_tag}"
+
+echo "Published images:"
+echo "  ${registry}/${backend_repo}:${image_tag}"
+echo "  ${registry}/${langgraph_repo}:${image_tag}"
+echo "  ${registry}/${frontend_repo}:${image_tag}"

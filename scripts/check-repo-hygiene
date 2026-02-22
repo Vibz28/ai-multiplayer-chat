@@ -1,0 +1,36 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+root_untracked=()
+while IFS= read -r line; do
+  root_untracked+=("$line")
+done < <(git ls-files --others --exclude-standard -- ':/*' | awk -F/ 'NF==1')
+
+suspect_root_artifacts=()
+for path in "${root_untracked[@]-}"; do
+  [[ -z "$path" ]] && continue
+  base_name="$(basename "$path")"
+  if [[ "$base_name" != *.* ]]; then
+    case "$base_name" in
+      Makefile|LICENSE)
+        continue
+        ;;
+    esac
+    suspect_root_artifacts+=("$base_name")
+  fi
+done
+
+if ((${#suspect_root_artifacts[@]} > 0)); then
+  echo "Unexpected untracked repo-root artifacts detected:" >&2
+  for path in "${suspect_root_artifacts[@]}"; do
+    echo "  - $path" >&2
+  done
+  echo "Use quoted arguments or --body-file when running CLI commands with symbols like > or ->." >&2
+  echo "Commit/remove these files before continuing." >&2
+  exit 1
+fi
+
+echo "Repo hygiene check passed."
