@@ -10,7 +10,8 @@ while IFS= read -r line; do
 done < <(git ls-files --others --exclude-standard -- ':/*' | awk -F/ 'NF==1')
 
 suspect_root_artifacts=()
-for path in "${root_untracked[@]}"; do
+for path in "${root_untracked[@]-}"; do
+  [[ -z "$path" ]] && continue
   base_name="$(basename "$path")"
   if [[ "$base_name" != *.* ]]; then
     case "$base_name" in

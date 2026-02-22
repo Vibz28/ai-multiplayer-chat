@@ -5,6 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 compose_file="${COMPOSE_FILE:-$repo_root/compose.yaml}"
 wait_timeout="${STACK_WAIT_TIMEOUT:-300}"
 log_tail="${STACK_LOG_TAIL:-200}"
+log_follow="${STACK_LOG_FOLLOW:-1}"
 
 export POSTGRES_PORT="${POSTGRES_PORT:-15432}"
 export REDIS_PORT="${REDIS_PORT:-16379}"
@@ -69,6 +70,9 @@ warn_loopback_frontend_conflict() {
 cmd="${1:-}"; shift || true
 
 case "$cmd" in
+  help|--help|-h)
+    usage
+    ;;
   up)
     "$repo_root/scripts/check-repo-hygiene"
     compose up -d --build --wait --wait-timeout "$wait_timeout"
@@ -91,10 +95,18 @@ case "$cmd" in
     compose ps
     ;;
   logs)
-    if [[ $# -gt 0 ]]; then
-      compose logs --tail "$log_tail" -f "$1"
+    if [[ "$log_follow" != "0" ]]; then
+      if [[ $# -gt 0 ]]; then
+        compose logs --tail "$log_tail" -f "$1"
+      else
+        compose logs --tail "$log_tail" -f
+      fi
     else
-      compose logs --tail "$log_tail" -f
+      if [[ $# -gt 0 ]]; then
+        compose logs --tail "$log_tail" "$1"
+      else
+        compose logs --tail "$log_tail"
+      fi
     fi
     ;;
   smoke)
@@ -109,6 +121,10 @@ case "$cmd" in
     echo "  langgraph: http://localhost:${LANGGRAPH_PORT}"
     ;;
   frontend-dev)
+    if [[ "${STACK_FRONTEND_DEV_DRY_RUN:-0}" == "1" ]]; then
+      echo "[dry-run] cd \"$repo_root/frontend\" && bun install && bun run dev --host 0.0.0.0 --port \"${FRONTEND_PORT}\""
+      exit 0
+    fi
     (cd "$repo_root/frontend" && bun install && bun run dev --host 0.0.0.0 --port "${FRONTEND_PORT}")
     ;;
   *)

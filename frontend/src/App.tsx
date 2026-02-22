@@ -58,31 +58,29 @@ function App() {
   const streamText = useMemo(() => streamSummary(controller.streamState), [controller.streamState])
 
   const selectedSenderId = controller.selectedSender?.id ?? ''
+  const connectedCount = controller.connectedParticipantIds.length
 
   return (
-    <main className="chat-dashboard">
-      <header className="dashboard-header panel">
-        <div>
-          <p className="kicker">AI Multiplayer Chat Platform</p>
-          <h1>Conversation Sandbox</h1>
+    <main className="chat-app">
+      <header className="topbar panel">
+        <div className="brand-block">
+          <p className="kicker">Multiplayer AI Workspace</p>
+          <h1>Collaborative AI Chat</h1>
           <p className="subtitle">
-            A chat-first workspace for testing live streaming, typing states, persona swaps, and
-            collaborative thread behavior without drowning in admin controls.
+            Bring multiple personas into one conversation, invite AI when needed, and track shared
+            progress through a live checklist.
           </p>
         </div>
-        <div className="header-actions">
+        <div className="topbar-actions">
           <button type="button" onClick={() => void controller.quickStartSession()}>
-            {controller.applicationId ? 'Session Ready' : 'Start Chat Session'}
+            {controller.applicationId ? 'Session Active' : 'Start Chat Session'}
           </button>
           <button
             type="button"
             className={controller.isIncognito ? 'ghost active' : 'ghost'}
             onClick={() => void controller.toggleIncognitoMode()}
           >
-            {controller.isIncognito ? 'Exit Incognito' : 'Incognito Session'}
-          </button>
-          <button type="button" className="ghost" onClick={() => setOpsVisible((current) => !current)}>
-            {opsVisible ? 'Hide Ops Console' : 'Show Ops Console'}
+            {controller.isIncognito ? 'Incognito On' : 'Incognito Off'}
           </button>
           <button
             type="button"
@@ -95,49 +93,24 @@ function App() {
         </div>
       </header>
 
-      <section className="quick-guide panel">
-        <div>
-          <h2>Quick Start</h2>
-          <ol>
-            <li>Press <strong>Start Chat Session</strong> to create/resolve a thread quickly.</li>
-            <li>Choose a persona chip and connect it (or connect all for concurrency tests).</li>
-            <li>Send prompts to watch live output/reasoning streams and checklist updates.</li>
-          </ol>
-        </div>
-        <div className="guide-metrics">
-          <div>
-            <span>application_id</span>
-            <code>{controller.applicationId || 'n/a'}</code>
-          </div>
-          <div>
-            <span>thread_id</span>
-            <code>{controller.threadId ?? 'n/a'}</code>
-          </div>
-          <div>
-            <span>persona</span>
-            <code>{selectedProfileLabel}</code>
-          </div>
-          <div>
-            <span>stream state</span>
-            <code>{controller.streamState}</code>
-          </div>
-        </div>
-      </section>
-
-      <section className={`dashboard-body ${opsVisible ? 'with-ops' : ''}`}>
-        <section className="chat-stage panel">
-          <div className="status-pills">
-            <span data-state={controller.connectionSummary}>connections: {controller.connectionSummary}</span>
-            <span data-state={controller.streamState}>stream: {controller.streamState}</span>
-            <span data-state={controller.isIncognito ? 'incognito' : 'standard'}>
-              {controller.isIncognito ? 'mode: incognito' : 'mode: standard'}
+      <section className="main-grid">
+        <section className="conversation-shell panel">
+          <div className="conversation-status">
+            <span className="status-pill" data-state={controller.connectionSummary}>
+              {connectedCount} connected
+            </span>
+            <span className="status-pill" data-state={controller.streamState}>
+              {streamText}
+            </span>
+            <span className="status-pill" data-state={controller.isIncognito ? 'incognito' : 'standard'}>
+              {controller.isIncognito ? 'Incognito' : 'Shared mode'}
             </span>
           </div>
 
-          <section className="identity-swapper">
-            <div className="panel-heading">
-              <h2>Persona Switcher</h2>
-              <p>Swap local user viewpoint instantly across connected participants.</p>
+          <section className="people-strip" aria-label="People in chat">
+            <div className="people-strip-head">
+              <h2>People in this chat</h2>
+              <p>Choose who you are speaking as.</p>
             </div>
             <div className="persona-chips">
               {controller.participants.map((participant) => (
@@ -153,24 +126,22 @@ function App() {
                 </button>
               ))}
             </div>
-            <div className="button-row">
+            <div className="button-row compact">
               <button
                 type="button"
                 onClick={() => selectedSenderId && controller.connectParticipant(selectedSenderId)}
                 disabled={!controller.applicationId || !selectedSenderId}
               >
-                Connect Selected
+                Connect selected
               </button>
-              <button type="button" onClick={controller.connectAllParticipants} disabled={!controller.applicationId}>
-                Connect All
+              <button type="button" className="ghost" onClick={controller.connectAllParticipants} disabled={!controller.applicationId}>
+                Connect everyone
               </button>
               <button type="button" className="ghost" onClick={controller.disconnectAllParticipants}>
-                Disconnect All
+                Disconnect all
               </button>
             </div>
           </section>
-
-          <ChecklistPanel items={controller.checklistItems} state={controller.checklistState} />
 
           <TranscriptPanel
             messages={controller.messages}
@@ -178,13 +149,6 @@ function App() {
             transcriptRef={controller.transcriptRef}
             onToggleReasoning={controller.toggleReasoning}
           />
-
-          <div className={`typing-indicator state-${controller.streamState}`}>
-            <span className="dot" />
-            <span className="dot" />
-            <span className="dot" />
-            <p>{streamText}</p>
-          </div>
 
           <ComposerPanel
             mode="focused"
@@ -207,56 +171,104 @@ function App() {
           />
         </section>
 
-        {opsVisible && (
-          <aside className="ops-drawer panel">
+        <aside className="supporting-shell">
+          <ChecklistPanel items={controller.checklistItems} state={controller.checklistState} />
+
+          <section className="session-card panel">
             <div className="panel-heading">
-              <h2>Ops Console</h2>
-              <p>Advanced controls for debug, trace, and multi-user orchestration tests.</p>
+              <h2>Session</h2>
+              <p>Friendly overview with advanced IDs tucked away.</p>
             </div>
-
-            <details open>
-              <summary>Session and Thread</summary>
-              <SessionControlPanel
-                sessionProfileId={controller.sessionProfileId}
-                sessionRole={controller.sessionRole}
-                applicationIdInput={controller.applicationIdInput}
-                applicationId={controller.applicationId}
-                threadId={controller.threadId}
-                workflowId={controller.workflowId}
-                traceId={controller.traceId}
-                connectedParticipantCount={controller.connectedParticipantIds.length}
-                onSessionProfileChange={controller.setSessionProfileId}
-                onSessionRoleChange={controller.setSessionRole}
-                onApplicationIdInputChange={controller.setApplicationIdInput}
-                onCreateSession={controller.createSession}
-                onAttachSession={controller.attachSession}
-                onResolveThread={controller.resolveThread}
-                onLoadHistory={controller.loadHistory}
-                onBroadcastPing={controller.broadcastPing}
-              />
-            </details>
-
+            <div className="session-badges">
+              <span>{selectedProfileLabel}</span>
+              <span>{controller.connectionSummary}</span>
+              <span>{controller.streamState}</span>
+            </div>
             <details>
-              <summary>Participants</summary>
-              <ParticipantsPanel
-                applicationId={controller.applicationId}
-                participants={controller.participants}
-                roster={controller.roster}
-                onUpdateParticipantField={controller.updateParticipantField}
-                onConnectParticipant={controller.connectParticipant}
-                onDisconnectParticipant={controller.disconnectParticipant}
-                onRemoveParticipant={controller.removeParticipant}
-                onAddParticipant={controller.addParticipant}
-              />
+              <summary>Show advanced IDs and debug controls</summary>
+              <dl className="technical-meta">
+                <div>
+                  <dt>application_id</dt>
+                  <dd>{controller.applicationId || 'n/a'}</dd>
+                </div>
+                <div>
+                  <dt>thread_id</dt>
+                  <dd>{controller.threadId ?? 'n/a'}</dd>
+                </div>
+                <div>
+                  <dt>workflow_id</dt>
+                  <dd>{controller.workflowId ?? 'n/a'}</dd>
+                </div>
+                <div>
+                  <dt>trace_id</dt>
+                  <dd>{controller.traceId ?? 'n/a'}</dd>
+                </div>
+              </dl>
+              <div className="button-row compact">
+                <button type="button" onClick={() => void controller.resolveThread()} disabled={!controller.applicationId}>
+                  Resolve thread
+                </button>
+                <button type="button" className="ghost" onClick={() => void controller.loadHistory()} disabled={!controller.applicationId}>
+                  Reload history
+                </button>
+                <button type="button" className="ghost" onClick={() => void controller.refreshChecklist()} disabled={!controller.applicationId}>
+                  Refresh checklist
+                </button>
+              </div>
             </details>
+          </section>
 
-            <details>
-              <summary>WebSocket Trace</summary>
-              <EventTracePanel events={controller.events} eventLogRef={controller.eventLogRef} />
-            </details>
-          </aside>
-        )}
+          <section className="ops-entry panel">
+            <div className="panel-heading">
+              <h2>Need Deep Diagnostics?</h2>
+              <p>Open the ops console only when you need low-level WebSocket and API controls.</p>
+            </div>
+            <button type="button" className="ghost" onClick={() => setOpsVisible((current) => !current)}>
+              {opsVisible ? 'Hide Ops Console' : 'Open Ops Console'}
+            </button>
+          </section>
+        </aside>
       </section>
+
+      {opsVisible && (
+        <section className="ops-console panel">
+          <div className="panel-heading">
+            <h2>Ops Console</h2>
+            <p>Advanced controls for thread wiring, diagnostics, participant sockets, and trace review.</p>
+          </div>
+          <div className="ops-grid">
+            <SessionControlPanel
+              sessionProfileId={controller.sessionProfileId}
+              sessionRole={controller.sessionRole}
+              applicationIdInput={controller.applicationIdInput}
+              applicationId={controller.applicationId}
+              threadId={controller.threadId}
+              workflowId={controller.workflowId}
+              traceId={controller.traceId}
+              connectedParticipantCount={controller.connectedParticipantIds.length}
+              onSessionProfileChange={controller.setSessionProfileId}
+              onSessionRoleChange={controller.setSessionRole}
+              onApplicationIdInputChange={controller.setApplicationIdInput}
+              onCreateSession={controller.createSession}
+              onAttachSession={controller.attachSession}
+              onResolveThread={controller.resolveThread}
+              onLoadHistory={controller.loadHistory}
+              onBroadcastPing={controller.broadcastPing}
+            />
+            <ParticipantsPanel
+              applicationId={controller.applicationId}
+              participants={controller.participants}
+              roster={controller.roster}
+              onUpdateParticipantField={controller.updateParticipantField}
+              onConnectParticipant={controller.connectParticipant}
+              onDisconnectParticipant={controller.disconnectParticipant}
+              onRemoveParticipant={controller.removeParticipant}
+              onAddParticipant={controller.addParticipant}
+            />
+            <EventTracePanel events={controller.events} eventLogRef={controller.eventLogRef} />
+          </div>
+        </section>
+      )}
     </main>
   )
 }

@@ -9,7 +9,7 @@ export function ChecklistPanel({ items, state }: ChecklistPanelProps) {
   return (
     <section className="checklist-panel" aria-live="polite">
       <div className="checklist-header">
-        <h3>Agent Checklist</h3>
+        <h3>Agent To-Do</h3>
         <span>{items.length} tasks</span>
       </div>
 

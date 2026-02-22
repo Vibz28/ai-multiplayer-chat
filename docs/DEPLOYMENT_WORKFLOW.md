@@ -15,6 +15,7 @@ From repo root:
 - `scripts/stack up` (full stack: frontend + backend + langgraph + postgres + redis + dynamodb-local)
 - `scripts/stack smoke` (health checks)
 - `scripts/stack logs backend` (tail specific logs)
+- `STACK_LOG_FOLLOW=0 scripts/stack logs backend` (non-following snapshot for CI/debug)
 - `scripts/stack down` (stop everything)
 
 Default local ports:
@@ -30,6 +31,7 @@ For frontend hot-reload while keeping containerized backend/langgraph:
 
 - `scripts/stack up-core`
 - `scripts/stack frontend-dev`
+- `STACK_FRONTEND_DEV_DRY_RUN=1 scripts/stack frontend-dev` (command preview only)
 
 ## 2) Image Build and Publish to AWS ECR
 
@@ -41,6 +43,7 @@ Requirements:
 Publish all runtime images:
 
 - `AWS_REGION=us-east-1 IMAGE_TAG=<tag> scripts/publish-ecr`
+- `DRY_RUN=1 AWS_ACCOUNT_ID=<account> IMAGE_TAG=<tag> scripts/publish-ecr` (safe command preview)
 
 Optional env vars:
 
@@ -58,6 +61,7 @@ The script creates repositories if missing and publishes:
 Trigger rolling deployments:
 
 - `ECS_CLUSTER=<cluster> ECS_BACKEND_SERVICE=<svc> ECS_LANGGRAPH_SERVICE=<svc> ECS_FRONTEND_SERVICE=<svc> scripts/deploy-ecs`
+- `DRY_RUN=1 ECS_CLUSTER=<cluster> ECS_BACKEND_SERVICE=<svc> scripts/deploy-ecs` (safe command preview)
 
 At least one service variable must be provided.
 
@@ -66,6 +70,7 @@ At least one service variable must be provided.
 If running Docker Compose on EC2:
 
 - `EC2_HOST=<host> EC2_USER=ec2-user EC2_APP_DIR=/opt/ai-multiplayer-chat scripts/deploy-ec2-compose`
+- `DRY_RUN=1 EC2_HOST=<host> scripts/deploy-ec2-compose` (safe command preview)
 
 This runs `./scripts/stack up` on the remote host.
 
@@ -99,4 +104,3 @@ For production, replace local endpoints in env vars:
 
 - backend: `BACKEND_DYNAMODB_ENDPOINT_URL` should target AWS DynamoDB (or be unset)
 - langgraph: `LANGGRAPH_POSTGRES_DSN`, `LANGGRAPH_REDIS_URL` should target RDS/ElastiCache
-

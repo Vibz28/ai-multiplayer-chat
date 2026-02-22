@@ -50,6 +50,7 @@ Use the script-first workflow:
 - `scripts/stack up`
 - `scripts/stack smoke`
 - `scripts/stack logs backend`
+- `STACK_LOG_FOLLOW=0 scripts/stack logs backend`
 - `scripts/stack down`
 
 AWS publish/deploy helpers:
@@ -57,6 +58,7 @@ AWS publish/deploy helpers:
 - `scripts/publish-ecr`
 - `scripts/deploy-ecs`
 - `scripts/deploy-ec2-compose`
+- all support safe previews via `DRY_RUN=1 ...`
 
 ## LangGraph TUI CLI
 

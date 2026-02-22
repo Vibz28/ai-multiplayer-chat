@@ -48,11 +48,14 @@ export function ComposerPanel({
 
   return (
     <article className={`composer-panel ${focused ? 'focused' : ''}`}>
-      <h2>{focused ? 'Message Composer' : 'Composer'}</h2>
+      <div className="panel-heading">
+        <h2>{focused ? 'Write a Message' : 'Composer'}</h2>
+        <p>Send to everyone or switch to private delivery for direct conversation.</p>
+      </div>
       <form className="composer-form" onSubmit={onSendMessage}>
         <div className="composer-grid">
           <label>
-            persona
+            speaking as
             <select value={selectedSenderId} onChange={(event) => onSelectedSenderChange(event.target.value)}>
               {senderOptions.map((option) => (
                 <option key={option.id} value={option.id}>
@@ -77,21 +80,21 @@ export function ComposerPanel({
           <textarea
             value={messageInput}
             onChange={(event) => onMessageInputChange(event.target.value)}
-            placeholder="Type a message. Press Send to stream response live."
+            placeholder="Type your message here..."
           />
         </label>
 
         <details className="advanced-composer" open={!focused}>
-          <summary>{focused ? 'Advanced delivery options' : 'Delivery options'}</summary>
+          <summary>{focused ? 'Advanced delivery settings' : 'Delivery settings'}</summary>
           <div className="advanced-composer-body">
             <label>
-              delivery mode
+              conversation type
               <select
                 value={deliveryMode}
                 onChange={(event) => onDeliveryModeChange(event.target.value as 'thread' | 'direct')}
               >
-                <option value="thread">group thread</option>
-                <option value="direct">private/direct</option>
+                <option value="thread">group chat</option>
+                <option value="direct">private message</option>
               </select>
             </label>
 
@@ -109,10 +112,10 @@ export function ComposerPanel({
 
         <div className="button-row">
           <button type="submit" disabled={!selectedSenderId || !applicationId}>
-            Send Message
+            Send
           </button>
-          <button type="button" onClick={onSendConcurrentAiBurst} disabled={!applicationId}>
-            Burst Test
+          <button type="button" className="ghost" onClick={onSendConcurrentAiBurst} disabled={!applicationId}>
+            Run AI concurrency test
           </button>
         </div>
       </form>

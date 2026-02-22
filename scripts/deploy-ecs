@@ -1,8 +1,43 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+usage() {
+  cat <<USAGE
+Usage: scripts/deploy-ecs [--dry-run]
+
+Required env:
+  ECS_CLUSTER
+
+Optional env:
+  AWS_REGION             (default: us-east-1)
+  ECS_BACKEND_SERVICE
+  ECS_LANGGRAPH_SERVICE
+  ECS_FRONTEND_SERVICE
+  DRY_RUN                (1/true/yes also enables dry-run)
+USAGE
+}
+
+dry_run=false
+case "${1:-}" in
+  --help|-h)
+    usage
+    exit 0
+    ;;
+  --dry-run)
+    dry_run=true
+    shift
+    ;;
+esac
+case "${DRY_RUN:-}" in
+  1|true|TRUE|yes|YES) dry_run=true ;;
+esac
+
 region="${AWS_REGION:-us-east-1}"
-cluster="${ECS_CLUSTER:?ECS_CLUSTER is required}"
+cluster="${ECS_CLUSTER:-}"
+if [[ -z "$cluster" ]]; then
+  echo "ECS_CLUSTER is required" >&2
+  exit 1
+fi
 
 backend_service="${ECS_BACKEND_SERVICE:-}"
 langgraph_service="${ECS_LANGGRAPH_SERVICE:-}"
@@ -18,13 +53,17 @@ update_service() {
   if [[ -z "$service_name" ]]; then
     return
   fi
-  aws ecs update-service \
-    --region "$region" \
-    --cluster "$cluster" \
-    --service "$service_name" \
-    --force-new-deployment \
-    >/dev/null
-  echo "Triggered deployment: $service_name"
+  if $dry_run; then
+    echo "[dry-run] aws ecs update-service --region \"$region\" --cluster \"$cluster\" --service \"$service_name\" --force-new-deployment"
+  else
+    aws ecs update-service \
+      --region "$region" \
+      --cluster "$cluster" \
+      --service "$service_name" \
+      --force-new-deployment \
+      >/dev/null
+    echo "Triggered deployment: $service_name"
+  fi
 }
 
 update_service "$backend_service"
