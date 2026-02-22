@@ -29,6 +29,7 @@ coerce_message_content = agent_module.coerce_message_content
 describe_session_context = agent_module.describe_session_context
 get_utc_time = agent_module.get_utc_time
 manage_checklist = agent_module.manage_checklist
+get_checklist_items = agent_module.get_checklist_items
 
 
 def test_add_numbers_tool() -> None:
@@ -75,3 +76,8 @@ def test_manage_checklist_tool_supports_dynamic_task_updates() -> None:
     )
     assert "1. [x] collect requirements" in completed
     assert "2. [ ] run tests" in completed
+    snapshot = get_checklist_items(thread_id)
+    assert snapshot == [
+        {"index": 1, "text": "collect requirements", "done": True},
+        {"index": 2, "text": "run tests", "done": False},
+    ]

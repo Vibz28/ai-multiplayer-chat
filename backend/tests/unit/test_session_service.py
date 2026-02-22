@@ -16,6 +16,9 @@ class InMemoryLangGraphClient:
     async def get_thread_history(self, *, thread_id: str, limit: int = 200):
         return []
 
+    async def get_thread_checklist(self, *, thread_id: str):
+        return []
+
     async def status_snapshot(self) -> dict[str, str]:
         return {"status": "ok"}
 

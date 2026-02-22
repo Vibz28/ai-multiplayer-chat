@@ -66,6 +66,15 @@ class ChecklistStore:
 
             return self._render(normalized_thread_id, checklist)
 
+    def snapshot(self, thread_id: str) -> list[dict[str, object]]:
+        normalized_thread_id = thread_id.strip() or "default"
+        with self._lock:
+            checklist = list(self._items_by_thread.get(normalized_thread_id, []))
+        return [
+            {"index": index, "text": item.text, "done": item.done}
+            for index, item in enumerate(checklist, start=1)
+        ]
+
     @staticmethod
     def _render(thread_id: str, checklist: list[ChecklistItem]) -> str:
         lines = [f"Checklist[{thread_id}]", "---"]
@@ -112,3 +121,8 @@ def manage_checklist(
         items=items,
         indices=indices,
     )
+
+
+def get_checklist_items(thread_id: str) -> list[dict[str, object]]:
+    """Return structured checklist items for API/diagnostic consumers."""
+    return _CHECKLIST_STORE.snapshot(thread_id)

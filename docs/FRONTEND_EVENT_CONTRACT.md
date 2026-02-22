@@ -32,6 +32,15 @@ This document is the frontend-facing contract for the backend session APIs and W
 - `GET /v1/sessions/{application_id}/history?limit=300`
   - Returns canonical thread history from LangGraph persistence (Postgres/Redis-backed).
 
+- `GET /v1/sessions/{application_id}/checklist`
+  - Returns canonical thread-scoped agent checklist items exposed by LangGraph tooling state.
+  - Response includes:
+    - `application_id`
+    - `langgraph_thread_id`
+    - `workflow_id`
+    - `langsmith_trace_id`
+    - `items[]` with `index`, `text`, `done`
+
 ## WebSocket Endpoint
 
 - `GET ws://<backend>/ws/{application_id}`

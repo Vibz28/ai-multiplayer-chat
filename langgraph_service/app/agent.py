@@ -10,7 +10,7 @@ from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
-from app.agent_tooling import manage_checklist
+from app.agent_tooling import get_checklist_items, manage_checklist
 from app.config import get_settings
 from app.prompt_loader import load_agent_prompt_template
 
@@ -131,3 +131,14 @@ def coerce_message_content(content: Any) -> str:
     if isinstance(content, list):
         return "\n".join(str(part) for part in content)
     return str(content)
+
+
+__all__ = [
+    "add_numbers",
+    "coerce_message_content",
+    "describe_session_context",
+    "get_checklist_items",
+    "get_compiled_graph",
+    "get_utc_time",
+    "manage_checklist",
+]

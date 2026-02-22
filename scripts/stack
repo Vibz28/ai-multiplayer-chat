@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+compose_file="${COMPOSE_FILE:-$repo_root/compose.yaml}"
+wait_timeout="${STACK_WAIT_TIMEOUT:-300}"
+log_tail="${STACK_LOG_TAIL:-200}"
+
+export POSTGRES_PORT="${POSTGRES_PORT:-15432}"
+export REDIS_PORT="${REDIS_PORT:-16379}"
+export DYNAMODB_PORT="${DYNAMODB_PORT:-18001}"
+export BACKEND_PORT="${BACKEND_PORT:-18000}"
+export LANGGRAPH_PORT="${LANGGRAPH_PORT:-8080}"
+export FRONTEND_PORT="${FRONTEND_PORT:-5173}"
+
+compose() {
+  (cd "$repo_root" && docker compose -f "$compose_file" "$@")
+}
+
+usage() {
+  cat <<USAGE
+Usage: scripts/stack <command>
+
+Commands:
+  up           Build and start the full stack (frontend + backend + langgraph + stores)
+  up-core      Build and start backend/langgraph/stores only (no frontend container)
+  down         Stop and remove stack containers
+  restart      Recreate full stack
+  status       Show container status
+  logs [svc]   Tail logs (all services or one service)
+  smoke        Run health checks against backend/langgraph/frontend
+  frontend-dev Run frontend in Bun dev mode against containerized backend
+USAGE
+}
+
+health_check() {
+  local url="$1"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsS "$url" >/dev/null
+  else
+    python - <<PY
+import urllib.request
+urllib.request.urlopen("$url")
+PY
+  fi
+}
+
+warn_loopback_frontend_conflict() {
+  if ! command -v lsof >/dev/null 2>&1; then
+    return
+  fi
+
+  local conflict
+  conflict="$(lsof -nP -iTCP:"${FRONTEND_PORT}" -sTCP:LISTEN 2>/dev/null | awk '
+    NR>1 {
+      if ($1 != "com.docke" && index($0, "[::1]:'"${FRONTEND_PORT}"' (LISTEN)") > 0) {
+        print $1 " (pid=" $2 ")"
+      }
+    }
+  ' | head -n 1)"
+
+  if [[ -n "$conflict" ]]; then
+    echo "warning: detected local loopback listener on [::1]:${FRONTEND_PORT}: ${conflict}" >&2
+    echo "warning: localhost may resolve to that process instead of Docker frontend." >&2
+    echo "warning: use http://127.0.0.1:${FRONTEND_PORT} or stop the conflicting process." >&2
+  fi
+}
+
+cmd="${1:-}"; shift || true
+
+case "$cmd" in
+  up)
+    "$repo_root/scripts/check-repo-hygiene"
+    compose up -d --build --wait --wait-timeout "$wait_timeout"
+    warn_loopback_frontend_conflict
+    ;;
+  up-core)
+    "$repo_root/scripts/check-repo-hygiene"
+    compose up -d --build --wait --wait-timeout "$wait_timeout" postgres redis dynamodb-local langgraph-service backend
+    ;;
+  down)
+    compose down
+    ;;
+  restart)
+    "$repo_root/scripts/check-repo-hygiene"
+    compose down
+    compose up -d --build --wait --wait-timeout "$wait_timeout"
+    warn_loopback_frontend_conflict
+    ;;
+  status|ps)
+    compose ps
+    ;;
+  logs)
+    if [[ $# -gt 0 ]]; then
+      compose logs --tail "$log_tail" -f "$1"
+    else
+      compose logs --tail "$log_tail" -f
+    fi
+    ;;
+  smoke)
+    compose ps
+    health_check "http://localhost:${BACKEND_PORT}/health"
+    health_check "http://localhost:${LANGGRAPH_PORT}/health"
+    health_check "http://localhost:${FRONTEND_PORT}/health"
+    warn_loopback_frontend_conflict
+    echo "Smoke checks passed:"
+    echo "  frontend:  http://localhost:${FRONTEND_PORT}"
+    echo "  backend:   http://localhost:${BACKEND_PORT}"
+    echo "  langgraph: http://localhost:${LANGGRAPH_PORT}"
+    ;;
+  frontend-dev)
+    (cd "$repo_root/frontend" && bun install && bun run dev --host 0.0.0.0 --port "${FRONTEND_PORT}")
+    ;;
+  *)
+    usage
+    exit 1
+    ;;
+esac

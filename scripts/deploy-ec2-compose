@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+remote_host="${EC2_HOST:?EC2_HOST is required}"
+remote_user="${EC2_USER:-ec2-user}"
+remote_dir="${EC2_APP_DIR:-/opt/ai-multiplayer-chat}"
+
+ssh_target="${remote_user}@${remote_host}"
+
+ssh "$ssh_target" "
+  set -euo pipefail
+  cd '$remote_dir'
+  ./scripts/stack up
+"
+
+echo "Remote stack refreshed on ${ssh_target}:${remote_dir}"

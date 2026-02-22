@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+region="${AWS_REGION:-us-east-1}"
+account_id="${AWS_ACCOUNT_ID:-$(aws sts get-caller-identity --query Account --output text)}"
+image_tag="${IMAGE_TAG:-$(cd "$repo_root" && git rev-parse --short HEAD)}"
+repo_prefix="${ECR_REPO_PREFIX:-ai-multiplayer-chat}"
+
+registry="${account_id}.dkr.ecr.${region}.amazonaws.com"
+
+backend_repo="${repo_prefix}/backend"
+langgraph_repo="${repo_prefix}/langgraph-service"
+frontend_repo="${repo_prefix}/frontend"
+
+ensure_repo() {
+  local repo_name="$1"
+  aws ecr describe-repositories --region "$region" --repository-names "$repo_name" >/dev/null 2>&1 || \
+    aws ecr create-repository --region "$region" --repository-name "$repo_name" >/dev/null
+}
+
+push_image() {
+  local local_image="$1"
+  local remote_image="$2"
+  docker tag "$local_image" "$remote_image"
+  docker push "$remote_image"
+}
+
+ensure_repo "$backend_repo"
+ensure_repo "$langgraph_repo"
+ensure_repo "$frontend_repo"
+
+aws ecr get-login-password --region "$region" | docker login --username AWS --password-stdin "$registry"
+
+(
+  cd "$repo_root"
+  BACKEND_IMAGE="ai-multiplayer-chat/backend:local" \
+  LANGGRAPH_IMAGE="ai-multiplayer-chat/langgraph-service:local" \
+  FRONTEND_IMAGE="ai-multiplayer-chat/frontend:local" \
+  docker compose -f compose.yaml build backend langgraph-service frontend
+)
+
+push_image "ai-multiplayer-chat/backend:local" "${registry}/${backend_repo}:${image_tag}"
+push_image "ai-multiplayer-chat/langgraph-service:local" "${registry}/${langgraph_repo}:${image_tag}"
+push_image "ai-multiplayer-chat/frontend:local" "${registry}/${frontend_repo}:${image_tag}"
+
+echo "Published images:"
+echo "  ${registry}/${backend_repo}:${image_tag}"
+echo "  ${registry}/${langgraph_repo}:${image_tag}"
+echo "  ${registry}/${frontend_repo}:${image_tag}"

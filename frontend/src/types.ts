@@ -44,6 +44,21 @@ export type SessionHistoryResponse = {
   count: number
 }
 
+export type ChecklistItem = {
+  index: number
+  text: string
+  done: boolean
+}
+
+export type SessionChecklistResponse = {
+  application_id: string
+  langgraph_thread_id: string
+  workflow_id: string | null
+  langsmith_trace_id: string | null
+  items: ChecklistItem[]
+  count: number
+}
+
 export type EventEnvelope = {
   type: string
   application_id: string

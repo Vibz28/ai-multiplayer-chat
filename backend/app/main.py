@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from app.config import get_settings
 from app.dependencies import (
+    get_checklist_service,
     get_history_service,
     get_langgraph_client,
     get_mapping_repository,
@@ -17,6 +18,7 @@ from app.dependencies import (
 from app.event_schema import normalize_event
 from app.models import (
     HealthCheckResponse,
+    SessionChecklistResponse,
     SessionCreateRequest,
     SessionHistoryResponse,
     SessionResponse,
@@ -139,6 +141,19 @@ async def get_session_history(
             application_id=application_id,
             limit=limit,
         )
+    except MappingNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Session or thread not found") from exc
+    except LangGraphClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+@app.get("/v1/sessions/{application_id}/checklist", response_model=SessionChecklistResponse)
+async def get_session_checklist(
+    application_id: str,
+    checklist_service=Depends(get_checklist_service),
+) -> SessionChecklistResponse:
+    try:
+        return await checklist_service.get_application_checklist(application_id=application_id)
     except MappingNotFoundError as exc:
         raise HTTPException(status_code=404, detail="Session or thread not found") from exc
     except LangGraphClientError as exc:

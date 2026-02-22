@@ -63,3 +63,15 @@ class ThreadHistoryResponse(BaseModel):
     thread_id: str
     entries: list[ThreadHistoryEntry]
     count: int
+
+
+class ChecklistItemResponse(BaseModel):
+    index: int
+    text: str
+    done: bool
+
+
+class ThreadChecklistResponse(BaseModel):
+    thread_id: str
+    items: list[ChecklistItemResponse]
+    count: int

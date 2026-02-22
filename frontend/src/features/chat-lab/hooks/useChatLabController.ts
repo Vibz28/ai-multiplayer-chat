@@ -3,9 +3,11 @@ import type { FormEvent, RefObject } from 'react'
 
 import type {
   ChatMessage,
+  ChecklistItem,
   EventEnvelope,
   Participant,
   RosterParticipant,
+  SessionChecklistResponse,
   SessionHistoryResponse,
   SessionResponse,
   StreamState,
@@ -58,6 +60,9 @@ export type ChatLabController = {
   expandedReasoning: Record<string, boolean>
   streamState: StreamState
   errorMessage: string
+  checklistItems: ChecklistItem[]
+  checklistState: 'idle' | 'loading' | 'error'
+  isIncognito: boolean
   transcriptRef: RefObject<HTMLDivElement | null>
   eventLogRef: RefObject<HTMLDivElement | null>
   setSessionProfileId: (value: string) => void
@@ -70,9 +75,14 @@ export type ChatLabController = {
   setMessageInput: (value: string) => void
   createSession: (event: FormEvent) => Promise<void>
   attachSession: (event: FormEvent) => Promise<void>
+  quickStartSession: () => Promise<void>
   resolveThread: () => Promise<void>
   loadHistory: () => Promise<void>
+  refreshChecklist: () => Promise<void>
+  toggleIncognitoMode: () => Promise<void>
   connectParticipant: (participantId: string) => void
+  connectAllParticipants: () => void
+  disconnectAllParticipants: () => void
   disconnectParticipant: (participantId: string) => void
   addParticipant: () => void
   removeParticipant: (participantId: string) => void
@@ -121,6 +131,9 @@ export function useChatLabController(): ChatLabController {
 
   const [streamState, setStreamState] = useState<StreamState>('idle')
   const [errorMessage, setErrorMessage] = useState('')
+  const [checklistItems, setChecklistItems] = useState<ChecklistItem[]>([])
+  const [checklistState, setChecklistState] = useState<'idle' | 'loading' | 'error'>('idle')
+  const [isIncognito, setIsIncognito] = useState(false)
 
   const socketsRef = useRef<Map<string, WebSocket>>(new Map())
   const seenEventKeysRef = useRef<Set<string>>(new Set())
@@ -303,6 +316,8 @@ export function useChatLabController(): ChatLabController {
     setMessages([])
     setEvents([])
     setRoster([])
+    setChecklistItems([])
+    setChecklistState('idle')
     setStreamState('idle')
     setExpandedReasoning({})
     seenEventKeysRef.current.clear()
@@ -323,23 +338,50 @@ export function useChatLabController(): ChatLabController {
     )
   }
 
+  const createSessionForProfile = async (
+    profileId: string | null,
+    role: string | null,
+  ): Promise<SessionResponse> => {
+    const response = await fetch(`${backendHttpUrl}/v1/sessions`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        profile_id: profileId,
+        role: role || 'member',
+      }),
+    })
+    if (!response.ok) {
+      throw new Error(`Session creation failed with status ${response.status}`)
+    }
+    return (await response.json()) as SessionResponse
+  }
+
+  const refreshChecklistForApplication = async (targetApplicationId: string): Promise<void> => {
+    setChecklistState('loading')
+    try {
+      const response = await fetch(`${backendHttpUrl}/v1/sessions/${targetApplicationId}/checklist`)
+      if (!response.ok) {
+        throw new Error(`Checklist fetch failed with status ${response.status}`)
+      }
+      const payload = (await response.json()) as SessionChecklistResponse
+      setChecklistItems(payload.items)
+      setThreadId(payload.langgraph_thread_id)
+      setWorkflowId(payload.workflow_id)
+      setTraceId(payload.langsmith_trace_id)
+      setChecklistState('idle')
+    } catch {
+      setChecklistItems([])
+      setChecklistState('error')
+    }
+  }
+
   const createSession = async (event: FormEvent) => {
     event.preventDefault()
     setErrorMessage('')
+    setIsIncognito(false)
 
     try {
-      const response = await fetch(`${backendHttpUrl}/v1/sessions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          profile_id: sessionProfileId || null,
-          role: sessionRole || 'member',
-        }),
-      })
-      if (!response.ok) {
-        throw new Error(`Session creation failed with status ${response.status}`)
-      }
-      const payload = (await response.json()) as SessionResponse
+      const payload = await createSessionForProfile(sessionProfileId || null, sessionRole || 'member')
       setApplicationId(payload.application_id)
       setApplicationIdInput(payload.application_id)
       setThreadId(payload.langgraph_thread_id)
@@ -348,6 +390,9 @@ export function useChatLabController(): ChatLabController {
       clearSockets()
       resetSessionRuntime()
       appendSystemMessage(`Session created for ${payload.application_id}`)
+      if (payload.langgraph_thread_id) {
+        await refreshChecklistForApplication(payload.application_id)
+      }
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Unknown session creation error')
     }
@@ -356,6 +401,7 @@ export function useChatLabController(): ChatLabController {
   const attachSession = async (event: FormEvent) => {
     event.preventDefault()
     setErrorMessage('')
+    setIsIncognito(false)
     if (!applicationIdInput.trim()) {
       setErrorMessage('Enter an existing application ID')
       return
@@ -374,9 +420,22 @@ export function useChatLabController(): ChatLabController {
       clearSockets()
       resetSessionRuntime()
       appendSystemMessage(`Attached to session ${payload.application_id}`)
+      if (payload.langgraph_thread_id) {
+        await refreshChecklistForApplication(payload.application_id)
+      }
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Unknown session attach error')
     }
+  }
+
+  const resolveThreadForApplication = async (targetApplicationId: string): Promise<ThreadResponse> => {
+    const response = await fetch(`${backendHttpUrl}/v1/sessions/${targetApplicationId}/thread`, {
+      method: 'POST',
+    })
+    if (!response.ok) {
+      throw new Error(`Thread resolution failed with status ${response.status}`)
+    }
+    return (await response.json()) as ThreadResponse
   }
 
   const resolveThread = async () => {
@@ -387,17 +446,12 @@ export function useChatLabController(): ChatLabController {
     setErrorMessage('')
 
     try {
-      const response = await fetch(`${backendHttpUrl}/v1/sessions/${applicationId}/thread`, {
-        method: 'POST',
-      })
-      if (!response.ok) {
-        throw new Error(`Thread resolution failed with status ${response.status}`)
-      }
-      const payload = (await response.json()) as ThreadResponse
+      const payload = await resolveThreadForApplication(applicationId)
       setThreadId(payload.langgraph_thread_id)
       setWorkflowId(payload.workflow_id)
       setTraceId(payload.langsmith_trace_id)
       appendSystemMessage(`Thread ready: ${payload.langgraph_thread_id}`)
+      await refreshChecklistForApplication(applicationId)
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Unknown thread resolution error')
     }
@@ -422,8 +476,87 @@ export function useChatLabController(): ChatLabController {
       activeAssistantByRunRef.current.clear()
       activeAssistantFallbackIdRef.current = null
       appendSystemMessage(`Loaded ${payload.count} history entries`)
+      await refreshChecklistForApplication(applicationId)
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Unknown history fetch error')
+    }
+  }
+
+  const refreshChecklist = async () => {
+    if (!applicationId) {
+      setChecklistItems([])
+      setChecklistState('idle')
+      return
+    }
+    await refreshChecklistForApplication(applicationId)
+  }
+
+  const quickStartSession = async () => {
+    setErrorMessage('')
+    try {
+      let activeApplicationId = applicationId
+      if (!activeApplicationId) {
+        const sessionPayload = await createSessionForProfile(sessionProfileId || null, sessionRole || 'member')
+        setApplicationId(sessionPayload.application_id)
+        setApplicationIdInput(sessionPayload.application_id)
+        setThreadId(sessionPayload.langgraph_thread_id)
+        setWorkflowId(sessionPayload.workflow_id)
+        setTraceId(sessionPayload.langsmith_trace_id)
+        clearSockets()
+        resetSessionRuntime()
+        appendSystemMessage(`Session created for ${sessionPayload.application_id}`)
+        activeApplicationId = sessionPayload.application_id
+      }
+      const threadPayload = await resolveThreadForApplication(activeApplicationId)
+      setThreadId(threadPayload.langgraph_thread_id)
+      setWorkflowId(threadPayload.workflow_id)
+      setTraceId(threadPayload.langsmith_trace_id)
+      await refreshChecklistForApplication(activeApplicationId)
+      appendSystemMessage(`Quick start ready for ${activeApplicationId}`)
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Unable to quick-start session')
+    }
+  }
+
+  const toggleIncognitoMode = async () => {
+    if (isIncognito) {
+      setIsIncognito(false)
+      clearSockets()
+      resetSessionRuntime()
+      setApplicationId('')
+      setApplicationIdInput('')
+      setThreadId(null)
+      setWorkflowId(null)
+      setTraceId(null)
+      appendSystemMessage('Incognito session closed and local state cleared.')
+      return
+    }
+
+    setErrorMessage('')
+    try {
+      const profileAlias = `incognito-${Math.random().toString(36).slice(2, 8)}`
+      setSessionProfileId(profileAlias)
+      setSessionRole('member')
+      setIsIncognito(true)
+      clearSockets()
+      resetSessionRuntime()
+
+      const payload = await createSessionForProfile(profileAlias, 'member')
+      setApplicationId(payload.application_id)
+      setApplicationIdInput(payload.application_id)
+      setThreadId(payload.langgraph_thread_id)
+      setWorkflowId(payload.workflow_id)
+      setTraceId(payload.langsmith_trace_id)
+
+      const threadPayload = await resolveThreadForApplication(payload.application_id)
+      setThreadId(threadPayload.langgraph_thread_id)
+      setWorkflowId(threadPayload.workflow_id)
+      setTraceId(threadPayload.langsmith_trace_id)
+      await refreshChecklistForApplication(payload.application_id)
+      appendSystemMessage(`Incognito session active for ${profileAlias}.`)
+    } catch (error) {
+      setIsIncognito(false)
+      setErrorMessage(error instanceof Error ? error.message : 'Unable to start incognito session')
     }
   }
 
@@ -552,6 +685,7 @@ export function useChatLabController(): ChatLabController {
     if (event.type === 'complete') {
       setStreamState('completed')
       completeAssistantDraft(runId, parsedTraceId)
+      void refreshChecklist()
       return
     }
 
@@ -629,6 +763,18 @@ export function useChatLabController(): ChatLabController {
     socket?.close()
     socketsRef.current.delete(participantId)
     upsertParticipant(participantId, { connectionState: 'disconnected' })
+  }
+
+  const connectAllParticipants = () => {
+    for (const participant of participants) {
+      connectParticipant(participant.id)
+    }
+  }
+
+  const disconnectAllParticipants = () => {
+    for (const participant of participants) {
+      disconnectParticipant(participant.id)
+    }
   }
 
   const broadcastPing = () => {
@@ -780,6 +926,9 @@ export function useChatLabController(): ChatLabController {
     expandedReasoning,
     streamState,
     errorMessage,
+    checklistItems,
+    checklistState,
+    isIncognito,
     transcriptRef,
     eventLogRef,
     setSessionProfileId,
@@ -792,9 +941,14 @@ export function useChatLabController(): ChatLabController {
     setMessageInput,
     createSession,
     attachSession,
+    quickStartSession,
     resolveThread,
     loadHistory,
+    refreshChecklist,
+    toggleIncognitoMode,
     connectParticipant,
+    connectAllParticipants,
+    disconnectAllParticipants,
     disconnectParticipant,
     addParticipant,
     removeParticipant,

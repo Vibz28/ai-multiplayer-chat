@@ -65,6 +65,7 @@ The YAML format is Hub-compatible (`lc/type/id/kwargs` manifest shape) and can b
 - `POST /agent/runs`: single-shot response
 - `POST /agent/stream`: NDJSON event stream for backend relay
 - `GET /threads/{thread_id}/history`: persisted run/message history for CLI and frontend retrieval
+- `GET /threads/{thread_id}/checklist`: structured checklist items maintained by `manage_checklist`
 
 Event types emitted by `POST /agent/stream`:
 

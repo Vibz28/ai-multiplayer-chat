@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+region="${AWS_REGION:-us-east-1}"
+cluster="${ECS_CLUSTER:?ECS_CLUSTER is required}"
+
+backend_service="${ECS_BACKEND_SERVICE:-}"
+langgraph_service="${ECS_LANGGRAPH_SERVICE:-}"
+frontend_service="${ECS_FRONTEND_SERVICE:-}"
+
+if [[ -z "$backend_service" && -z "$langgraph_service" && -z "$frontend_service" ]]; then
+  echo "Set at least one of ECS_BACKEND_SERVICE, ECS_LANGGRAPH_SERVICE, ECS_FRONTEND_SERVICE" >&2
+  exit 1
+fi
+
+update_service() {
+  local service_name="$1"
+  if [[ -z "$service_name" ]]; then
+    return
+  fi
+  aws ecs update-service \
+    --region "$region" \
+    --cluster "$cluster" \
+    --service "$service_name" \
+    --force-new-deployment \
+    >/dev/null
+  echo "Triggered deployment: $service_name"
+}
+
+update_service "$backend_service"
+update_service "$langgraph_service"
+update_service "$frontend_service"

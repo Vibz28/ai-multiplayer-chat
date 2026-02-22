@@ -7,12 +7,15 @@ import asyncpg
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse
 
+from app.agent_tooling import get_checklist_items
 from app.history_store import fetch_thread_history, persist_history_entry
 from app.runtime import lifespan, postgres_healthy, redis_healthy, settings, state
 from app.schemas import (
     AgentRunRequest,
     AgentRunResponse,
+    ChecklistItemResponse,
     HealthResponse,
+    ThreadChecklistResponse,
     ThreadHistoryEntry,
     ThreadHistoryResponse,
     ThreadRequest,
@@ -107,6 +110,12 @@ async def get_thread_history(thread_id: str, limit: int = 200) -> ThreadHistoryR
         entries=entries,
         count=len(entries),
     )
+
+
+@app.get("/threads/{thread_id}/checklist", response_model=ThreadChecklistResponse)
+async def get_thread_checklist(thread_id: str) -> ThreadChecklistResponse:
+    items = [ChecklistItemResponse.model_validate(item) for item in get_checklist_items(thread_id)]
+    return ThreadChecklistResponse(thread_id=thread_id, items=items, count=len(items))
 
 
 @app.post("/agent/runs", response_model=AgentRunResponse)

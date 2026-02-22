@@ -52,6 +52,21 @@ class SessionHistoryResponse(BaseModel):
     count: int
 
 
+class ChecklistItemResponse(BaseModel):
+    index: int
+    text: str
+    done: bool
+
+
+class SessionChecklistResponse(BaseModel):
+    application_id: str
+    langgraph_thread_id: str
+    workflow_id: str | None
+    langsmith_trace_id: str | None
+    items: list[ChecklistItemResponse]
+    count: int
+
+
 class WebSocketInboundMessage(BaseModel):
     type: Literal["ping", "user_message", "join", "leave"]
     content: str | None = Field(default=None, max_length=8000)

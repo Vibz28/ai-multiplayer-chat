@@ -2,23 +2,24 @@ name: ai-multiplayer-chat
 
 services:
   postgres:
-    image: postgres:latest
+    image: postgres:17-alpine
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
       POSTGRES_DB: langgraph
+      PGDATA: /var/lib/postgresql/data/pgdata
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d langgraph"]
       interval: 5s
       timeout: 3s
       retries: 20
     volumes:
-      - postgres_data:/var/lib/postgresql
+      - postgres_data:/var/lib/postgresql/data
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_PORT:-15432}:5432"
 
   redis:
-    image: redis:latest
+    image: redis:8-alpine
     command: ["redis-server", "--save", "", "--appendonly", "no"]
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
@@ -26,7 +27,7 @@ services:
       timeout: 3s
       retries: 20
     ports:
-      - "${REDIS_PORT:-6379}:6379"
+      - "${REDIS_PORT:-16379}:6379"
 
   dynamodb-local:
     image: amazon/dynamodb-local:latest
@@ -37,18 +38,13 @@ services:
       timeout: 3s
       retries: 10
     ports:
-      - "${DYNAMODB_PORT:-8001}:8000"
+      - "${DYNAMODB_PORT:-18001}:8000"
 
   langgraph-service:
-    image: python:3.14-slim
-    working_dir: /workspace/langgraph_service
-    volumes:
-      - ./:/workspace
-    command: >-
-      bash -lc "pip install --no-cache-dir -r requirements.txt &&
-      uvicorn app.main:app --host 0.0.0.0 --port 8080"
-    ports:
-      - "${LANGGRAPH_PORT:-8080}:8080"
+    image: ${LANGGRAPH_IMAGE:-ai-multiplayer-chat/langgraph-service:local}
+    build:
+      context: .
+      dockerfile: langgraph_service/Dockerfile
     environment:
       LANGGRAPH_POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/langgraph
       LANGGRAPH_REDIS_URL: redis://redis:6379/0
@@ -58,6 +54,9 @@ services:
       LANGGRAPH_OLLAMA_FALLBACK_CLOUD_MODEL: ${LANGGRAPH_OLLAMA_FALLBACK_CLOUD_MODEL:-qwen3-vl:235b-cloud}
       LANGGRAPH_OLLAMA_FALLBACK_LOCAL_BASE_URL: ${LANGGRAPH_OLLAMA_FALLBACK_LOCAL_BASE_URL:-http://host.docker.internal:11434}
       LANGGRAPH_OLLAMA_FALLBACK_LOCAL_MODEL: ${LANGGRAPH_OLLAMA_FALLBACK_LOCAL_MODEL:-gpt-oss:20b}
+      LANGGRAPH_AGENT_PROMPT_MANIFEST_PATH: ${LANGGRAPH_AGENT_PROMPT_MANIFEST_PATH:-agent_prompts/system_prompt.yaml}
+      LANGGRAPH_AGENT_PROMPT_HUB_IDENTIFIER: ${LANGGRAPH_AGENT_PROMPT_HUB_IDENTIFIER:-}
+      LANGGRAPH_AGENT_SYSTEM_PROMPT_FALLBACK: ${LANGGRAPH_AGENT_SYSTEM_PROMPT_FALLBACK:-You are the orchestration agent for a multi-service chat platform.}
       LANGGRAPH_LANGSMITH_TRACING: ${LANGGRAPH_LANGSMITH_TRACING:-true}
       LANGGRAPH_LANGSMITH_PROJECT: ${LANGGRAPH_LANGSMITH_PROJECT:-ai-multiplayer-chat}
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
@@ -69,6 +68,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    ports:
+      - "${LANGGRAPH_PORT:-8080}:8080"
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 10s
@@ -76,28 +77,49 @@ services:
       retries: 20
 
   backend:
-    image: python:3.14-slim
-    working_dir: /workspace/backend
-    volumes:
-      - ./:/workspace
-    command: >-
-      bash -lc "pip install --no-cache-dir -r requirements.txt &&
-      uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    image: ${BACKEND_IMAGE:-ai-multiplayer-chat/backend:local}
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
     environment:
       BACKEND_DYNAMODB_ENDPOINT_URL: http://dynamodb-local:8000
       BACKEND_LANGGRAPH_SERVICE_URL: http://langgraph-service:8080
-      BACKEND_DYNAMODB_TABLE_NAME: application_thread_mapping
-      BACKEND_DYNAMODB_REGION: us-east-1
-      BACKEND_DYNAMODB_ACCESS_KEY_ID: dummy
-      BACKEND_DYNAMODB_SECRET_ACCESS_KEY: dummy
-      BACKEND_APPLICATION_ID_PREFIX: app
+      BACKEND_DYNAMODB_TABLE_NAME: ${BACKEND_DYNAMODB_TABLE_NAME:-application_thread_mapping}
+      BACKEND_DYNAMODB_REGION: ${BACKEND_DYNAMODB_REGION:-us-east-1}
+      BACKEND_DYNAMODB_ACCESS_KEY_ID: ${BACKEND_DYNAMODB_ACCESS_KEY_ID:-dummy}
+      BACKEND_DYNAMODB_SECRET_ACCESS_KEY: ${BACKEND_DYNAMODB_SECRET_ACCESS_KEY:-dummy}
+      BACKEND_APPLICATION_ID_PREFIX: ${BACKEND_APPLICATION_ID_PREFIX:-app}
     depends_on:
       dynamodb-local:
         condition: service_started
       langgraph-service:
         condition: service_healthy
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      - "${BACKEND_PORT:-18000}:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+  frontend:
+    image: ${FRONTEND_IMAGE:-ai-multiplayer-chat/frontend:local}
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+      args:
+        VITE_BACKEND_HTTP_URL: ${VITE_BACKEND_HTTP_URL:-http://localhost:18000}
+        VITE_BACKEND_WS_URL: ${VITE_BACKEND_WS_URL:-ws://localhost:18000}
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "${FRONTEND_PORT:-5173}:80"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
 
 volumes:
   postgres_data:

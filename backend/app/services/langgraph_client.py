@@ -26,6 +26,12 @@ class ThreadHistoryEntry(BaseModel):
     created_at: datetime
 
 
+class ThreadChecklistItem(BaseModel):
+    index: int
+    text: str
+    done: bool
+
+
 class LangGraphClientProtocol(Protocol):
     async def health(self) -> bool:
         ...
@@ -39,6 +45,9 @@ class LangGraphClientProtocol(Protocol):
         thread_id: str,
         limit: int = 200,
     ) -> list[ThreadHistoryEntry]:
+        ...
+
+    async def get_thread_checklist(self, *, thread_id: str) -> list[ThreadChecklistItem]:
         ...
 
     async def status_snapshot(self) -> dict[str, str]:
@@ -110,6 +119,25 @@ class LangGraphClient:
             if not isinstance(raw, dict):
                 continue
             parsed.append(ThreadHistoryEntry.model_validate(raw))
+        return parsed
+
+    async def get_thread_checklist(self, *, thread_id: str) -> list[ThreadChecklistItem]:
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
+                response = await client.get(f"{self._base_url}/threads/{thread_id}/checklist")
+                response.raise_for_status()
+        except httpx.HTTPError as exc:
+            raise LangGraphClientError("Unable to fetch thread checklist from LangGraph service") from exc
+
+        payload = response.json()
+        items = payload.get("items", [])
+        if not isinstance(items, list):
+            raise LangGraphClientError("LangGraph checklist response missing items list")
+        parsed: list[ThreadChecklistItem] = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            parsed.append(ThreadChecklistItem.model_validate(raw))
         return parsed
 
     async def status_snapshot(self) -> dict[str, str]:

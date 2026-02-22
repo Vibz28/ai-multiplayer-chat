@@ -41,6 +41,22 @@ Work is delivered in phased feature branches and merged to `main` after validati
 - `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/docs/ARCHITECTURE_DECISIONS.md`
 - `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/docs/LANGGRAPH_AGENT_REQUIREMENTS.md`
 - `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/docs/FRONTEND_EVENT_CONTRACT.md`
+- `/Users/vibhorjaney/Downloads/ai-multiplayer-chat/docs/DEPLOYMENT_WORKFLOW.md`
+
+## Stack Operations
+
+Use the script-first workflow:
+
+- `scripts/stack up`
+- `scripts/stack smoke`
+- `scripts/stack logs backend`
+- `scripts/stack down`
+
+AWS publish/deploy helpers:
+
+- `scripts/publish-ecr`
+- `scripts/deploy-ecs`
+- `scripts/deploy-ec2-compose`
 
 ## LangGraph TUI CLI
 
@@ -77,6 +93,7 @@ Run locally:
 
 - `cd frontend && bun install`
 - `cd frontend && bun run dev`
+- `cd frontend && bun run check` (pre-merge: lint, test, build, then type-check)
 
 Phase 3 frontend capabilities:
 

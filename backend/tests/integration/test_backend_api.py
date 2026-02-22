@@ -4,6 +4,7 @@ from collections import defaultdict
 from datetime import UTC, datetime
 
 from app.dependencies import (
+    get_checklist_service,
     get_history_service,
     get_langgraph_client,
     get_mapping_repository,
@@ -12,8 +13,9 @@ from app.dependencies import (
 )
 from app.main import app
 from app.repositories.in_memory_mapping_repository import InMemoryMappingRepository
+from app.services.checklist_service import CanonicalChecklistService
 from app.services.history_service import CanonicalHistoryService
-from app.services.langgraph_client import ThreadHistoryEntry
+from app.services.langgraph_client import ThreadChecklistItem, ThreadHistoryEntry
 from app.services.session_service import SessionService
 from app.services.websocket_hub import WebSocketHub
 from fastapi.testclient import TestClient
@@ -24,6 +26,7 @@ class InMemoryLangGraphClient:
         self._threads: dict[str, str] = {}
         self._counters = defaultdict(int)
         self._history: dict[str, list[dict[str, object]]] = defaultdict(list)
+        self._checklists: dict[str, list[dict[str, object]]] = defaultdict(list)
 
     async def health(self) -> bool:
         return True
@@ -43,6 +46,9 @@ class InMemoryLangGraphClient:
         rows = self._history.get(thread_id, [])
         bounded = max(1, min(limit, 1000))
         return rows[-bounded:]
+
+    async def get_thread_checklist(self, *, thread_id: str):
+        return self._checklists.get(thread_id, [])
 
     async def stream_agent_run(
         self,
@@ -78,6 +84,10 @@ class InMemoryLangGraphClient:
             created_at=datetime.now(UTC),
         )
         self._history[thread_id].extend([user_entry, assistant_entry])
+        self._checklists[thread_id] = [
+            ThreadChecklistItem(index=1, text=f"handle prompt: {message}", done=True),
+            ThreadChecklistItem(index=2, text="send completion event", done=True),
+        ]
 
         yield {
             "type": "reasoning",
@@ -111,12 +121,17 @@ def build_test_client() -> TestClient:
         mapping_repository=repository,
         langgraph_client=langgraph_client,
     )
+    checklist_service = CanonicalChecklistService(
+        mapping_repository=repository,
+        langgraph_client=langgraph_client,
+    )
     hub = WebSocketHub()
 
     app.dependency_overrides[get_mapping_repository] = lambda: repository
     app.dependency_overrides[get_langgraph_client] = lambda: langgraph_client
     app.dependency_overrides[get_session_service] = lambda: session_service
     app.dependency_overrides[get_history_service] = lambda: history_service
+    app.dependency_overrides[get_checklist_service] = lambda: checklist_service
     app.dependency_overrides[get_websocket_hub] = lambda: hub
 
     return TestClient(app)
@@ -222,6 +237,30 @@ def test_history_endpoint_reads_canonical_langgraph_history() -> None:
         session_payload = session_response.json()
         assert session_payload["workflow_id"] == "run_fake"
         assert session_payload["langsmith_trace_id"] == "trace_fake"
+
+    app.dependency_overrides.clear()
+
+
+def test_checklist_endpoint_reads_canonical_langgraph_checklist() -> None:
+    with build_test_client() as client:
+        create_response = client.post("/v1/sessions", json={"profile_id": "delta", "role": "member"})
+        application_id = create_response.json()["application_id"]
+        thread_response = client.post(f"/v1/sessions/{application_id}/thread")
+        assert thread_response.status_code == 200
+
+        with client.websocket_connect(f"/ws/{application_id}") as websocket:
+            websocket.receive_json()  # connection
+            websocket.send_json({"type": "user_message", "content": "checklist sync test"})
+            for _ in range(6):
+                websocket.receive_json()
+
+        checklist_response = client.get(f"/v1/sessions/{application_id}/checklist")
+        assert checklist_response.status_code == 200
+        payload = checklist_response.json()
+        assert payload["application_id"] == application_id
+        assert payload["langgraph_thread_id"].startswith("thread_")
+        assert payload["count"] >= 1
+        assert payload["items"][0]["text"].startswith("handle prompt:")
 
     app.dependency_overrides.clear()
 
