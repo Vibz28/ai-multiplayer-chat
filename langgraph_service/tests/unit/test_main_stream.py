@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import sys
 import types
-import typing
-from datetime import datetime
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
@@ -29,12 +27,9 @@ config_spec.loader.exec_module(config_module)
 previous_app = sys.modules.get("app")
 previous_app_agent = sys.modules.get("app.agent")
 previous_app_config = sys.modules.get("app.config")
-if previous_app is None:
-    app_module = types.ModuleType("app")
-    app_module.__path__ = [str(service_root / "app")]  # type: ignore[attr-defined]
-    sys.modules["app"] = app_module
-else:
-    app_module = previous_app
+app_module = types.ModuleType("app")
+app_module.__path__ = [str(service_root / "app")]  # type: ignore[attr-defined]
+sys.modules["app"] = app_module
 
 sys.modules["app.agent"] = agent_module
 sys.modules["app.config"] = config_module
@@ -46,11 +41,10 @@ if main_spec is None or main_spec.loader is None:
     raise RuntimeError("Unable to load langgraph_service main module")
 main_module = module_from_spec(main_spec)
 main_spec.loader.exec_module(main_module)
-main_module.AgentStreamEvent.model_rebuild(
-    _types_namespace={"Any": typing.Any, "datetime": datetime}
-)
 
-if previous_app is None:
+if previous_app is not None:
+    sys.modules["app"] = previous_app
+else:
     sys.modules.pop("app", None)
 if previous_app_agent is not None:
     sys.modules["app.agent"] = previous_app_agent
