@@ -20,7 +20,10 @@ class MappingConflictError(Exception):
 class MappingRecord:
     application_id: str
     profile_id: str | None
+    role: str | None
     langgraph_thread_id: str | None
+    workflow_id: str | None
+    langsmith_trace_id: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -32,13 +35,26 @@ class MappingRepository(Protocol):
     def ping(self) -> bool:
         ...
 
-    def create_application(self, application_id: str, profile_id: str | None) -> MappingRecord:
+    def create_application(
+        self,
+        application_id: str,
+        profile_id: str | None,
+        role: str | None,
+    ) -> MappingRecord:
         ...
 
     def get_mapping(self, application_id: str) -> MappingRecord | None:
         ...
 
     def assign_thread(self, application_id: str, langgraph_thread_id: str) -> MappingRecord:
+        ...
+
+    def upsert_workflow_metadata(
+        self,
+        application_id: str,
+        workflow_id: str | None,
+        langsmith_trace_id: str | None,
+    ) -> MappingRecord:
         ...
 
 
@@ -88,12 +104,20 @@ class DynamoDBMappingRepository:
         self._table.load()
         return True
 
-    def create_application(self, application_id: str, profile_id: str | None) -> MappingRecord:
+    def create_application(
+        self,
+        application_id: str,
+        profile_id: str | None,
+        role: str | None,
+    ) -> MappingRecord:
         now = datetime.now(UTC).isoformat()
         item = {
             "application_id": application_id,
             "profile_id": profile_id,
+            "role": role,
             "langgraph_thread_id": None,
+            "workflow_id": None,
+            "langsmith_trace_id": None,
             "created_at": now,
             "updated_at": now,
         }
@@ -143,12 +167,51 @@ class DynamoDBMappingRepository:
             raise MappingNotFoundError(application_id)
         return self._to_record(attributes)
 
+    def upsert_workflow_metadata(
+        self,
+        application_id: str,
+        workflow_id: str | None,
+        langsmith_trace_id: str | None,
+    ) -> MappingRecord:
+        now = datetime.now(UTC).isoformat()
+        values: dict[str, str | None] = {
+            ":updated_at": now,
+            ":workflow_id": workflow_id,
+            ":langsmith_trace_id": langsmith_trace_id,
+        }
+
+        try:
+            response = self._table.update_item(
+                Key={"application_id": application_id},
+                UpdateExpression=(
+                    "SET workflow_id=:workflow_id, "
+                    "langsmith_trace_id=:langsmith_trace_id, "
+                    "updated_at=:updated_at"
+                ),
+                ExpressionAttributeValues=values,
+                ConditionExpression="attribute_exists(application_id)",
+                ReturnValues="ALL_NEW",
+            )
+        except ClientError as exc:
+            code = exc.response.get("Error", {}).get("Code", "")
+            if code == "ConditionalCheckFailedException":
+                raise MappingNotFoundError(application_id) from exc
+            raise
+
+        attributes = response.get("Attributes")
+        if not attributes:
+            raise MappingNotFoundError(application_id)
+        return self._to_record(attributes)
+
     @staticmethod
     def _to_record(item: dict[str, str | None]) -> MappingRecord:
         return MappingRecord(
             application_id=str(item["application_id"]),
             profile_id=item.get("profile_id"),
+            role=item.get("role"),
             langgraph_thread_id=item.get("langgraph_thread_id"),
+            workflow_id=item.get("workflow_id"),
+            langsmith_trace_id=item.get("langsmith_trace_id"),
             created_at=datetime.fromisoformat(str(item["created_at"])),
             updated_at=datetime.fromisoformat(str(item["updated_at"])),
         )

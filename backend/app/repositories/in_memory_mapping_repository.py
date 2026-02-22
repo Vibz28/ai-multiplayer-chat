@@ -22,7 +22,12 @@ class InMemoryMappingRepository:
     def ping(self) -> bool:
         return True
 
-    def create_application(self, application_id: str, profile_id: str | None) -> MappingRecord:
+    def create_application(
+        self,
+        application_id: str,
+        profile_id: str | None,
+        role: str | None,
+    ) -> MappingRecord:
         with self._lock:
             if application_id in self._records:
                 raise MappingConflictError(application_id)
@@ -30,7 +35,10 @@ class InMemoryMappingRepository:
             record = MappingRecord(
                 application_id=application_id,
                 profile_id=profile_id,
+                role=role,
                 langgraph_thread_id=None,
+                workflow_id=None,
+                langsmith_trace_id=None,
                 created_at=now,
                 updated_at=now,
             )
@@ -54,6 +62,25 @@ class InMemoryMappingRepository:
             updated = replace(
                 existing,
                 langgraph_thread_id=langgraph_thread_id,
+                updated_at=datetime.now(UTC),
+            )
+            self._records[application_id] = updated
+            return updated
+
+    def upsert_workflow_metadata(
+        self,
+        application_id: str,
+        workflow_id: str | None,
+        langsmith_trace_id: str | None,
+    ) -> MappingRecord:
+        with self._lock:
+            existing = self._records.get(application_id)
+            if existing is None:
+                raise MappingNotFoundError(application_id)
+            updated = replace(
+                existing,
+                workflow_id=workflow_id,
+                langsmith_trace_id=langsmith_trace_id,
                 updated_at=datetime.now(UTC),
             )
             self._records[application_id] = updated

@@ -2,6 +2,7 @@ from functools import lru_cache
 
 from app.config import get_settings
 from app.repositories.mapping_repository import DynamoDBMappingRepository
+from app.services.history_service import CanonicalHistoryService
 from app.services.langgraph_client import LangGraphClient
 from app.services.session_service import SessionService
 from app.services.websocket_hub import WebSocketHub
@@ -32,6 +33,14 @@ def get_session_service() -> SessionService:
         repository=get_mapping_repository(),
         langgraph_client=get_langgraph_client(),
         application_id_prefix=settings.application_id_prefix,
+    )
+
+
+@lru_cache
+def get_history_service() -> CanonicalHistoryService:
+    return CanonicalHistoryService(
+        mapping_repository=get_mapping_repository(),
+        langgraph_client=get_langgraph_client(),
     )
 
 

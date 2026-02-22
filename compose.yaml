@@ -47,6 +47,8 @@ services:
     command: >-
       bash -lc "pip install --no-cache-dir -r requirements.txt &&
       uvicorn app.main:app --host 0.0.0.0 --port 8080"
+    ports:
+      - "${LANGGRAPH_PORT:-8080}:8080"
     environment:
       LANGGRAPH_POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/langgraph
       LANGGRAPH_REDIS_URL: redis://redis:6379/0

@@ -24,12 +24,13 @@ class SessionService:
         self._langgraph_client = langgraph_client
         self._application_id_prefix = application_id_prefix
 
-    async def create_session(self, profile_id: str | None) -> MappingRecord:
+    async def create_session(self, profile_id: str | None, role: str | None) -> MappingRecord:
         application_id = generate_application_id(self._application_id_prefix)
         return await run_in_threadpool(
             self._repository.create_application,
             application_id,
             profile_id,
+            role,
         )
 
     async def get_session(self, application_id: str) -> MappingRecord | None:

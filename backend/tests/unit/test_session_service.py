@@ -13,8 +13,22 @@ class InMemoryLangGraphClient:
         self.calls += 1
         return f"thread_for_{application_id}"
 
+    async def get_thread_history(self, *, thread_id: str, limit: int = 200):
+        return []
+
     async def status_snapshot(self) -> dict[str, str]:
         return {"status": "ok"}
+
+    async def stream_agent_run(
+        self,
+        *,
+        application_id: str,
+        thread_id: str,
+        profile_id: str | None,
+        message: str,
+    ):
+        if False:
+            yield {}
 
 
 async def test_session_service_resolves_thread_once() -> None:
@@ -26,7 +40,7 @@ async def test_session_service_resolves_thread_once() -> None:
         application_id_prefix="app",
     )
 
-    session = await service.create_session(profile_id="profile-a")
+    session = await service.create_session(profile_id="profile-a", role="member")
     first = await service.ensure_thread(session.application_id)
     second = await service.ensure_thread(session.application_id)
 

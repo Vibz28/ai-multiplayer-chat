@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import json
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from os import getenv
 from typing import Any
 from uuid import uuid4
 
 import asyncpg
 from fastapi import FastAPI, HTTPException
+from fastapi.responses import StreamingResponse
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from pydantic import BaseModel
 from redis.asyncio import Redis
@@ -42,7 +46,36 @@ class AgentRunResponse(BaseModel):
     thread_id: str
     answer_markdown: str
     tool_messages: list[str]
+    run: dict[str, Any]
     captured_at: datetime
+
+
+class AgentStreamEvent(BaseModel):
+    type: str
+    stream_state: str
+    application_id: str
+    thread_id: str
+    payload: dict[str, Any]
+    timestamp: datetime
+
+
+class ThreadHistoryEntry(BaseModel):
+    application_id: str
+    thread_id: str
+    profile_id: str | None
+    role: str
+    channel: str
+    content: str
+    run_id: str | None = None
+    trace_id: str | None = None
+    metadata: dict[str, Any]
+    created_at: datetime
+
+
+class ThreadHistoryResponse(BaseModel):
+    thread_id: str
+    entries: list[ThreadHistoryEntry]
+    count: int
 
 
 class RuntimeState:
@@ -72,6 +105,29 @@ async def lifespan(_: FastAPI):
             )
             """
         )
+        await connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS thread_events (
+                id BIGSERIAL PRIMARY KEY,
+                application_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL,
+                profile_id TEXT,
+                role TEXT NOT NULL,
+                channel TEXT NOT NULL,
+                content TEXT NOT NULL,
+                run_id TEXT,
+                trace_id TEXT,
+                metadata JSONB NOT NULL DEFAULT '{}'::jsonb,
+                created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+            )
+            """
+        )
+        await connection.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_thread_events_thread_created
+            ON thread_events(thread_id, created_at)
+            """
+        )
     await state.redis_client.ping()
 
     yield
@@ -83,6 +139,821 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title=settings.api_title, lifespan=lifespan)
+
+
+def _build_event(
+    *,
+    event_type: str,
+    stream_state: str,
+    application_id: str,
+    thread_id: str,
+    payload: dict[str, Any],
+) -> AgentStreamEvent:
+    return AgentStreamEvent(
+        type=event_type,
+        stream_state=stream_state,
+        application_id=application_id,
+        thread_id=thread_id,
+        payload=payload,
+        timestamp=datetime.now(UTC),
+    )
+
+
+async def _persist_history_entry(
+    *,
+    application_id: str,
+    thread_id: str,
+    profile_id: str | None,
+    role: str,
+    channel: str,
+    content: str,
+    run_id: str | None = None,
+    trace_id: str | None = None,
+    metadata: dict[str, Any] | None = None,
+    created_at: datetime | None = None,
+) -> None:
+    captured_at = created_at or datetime.now(UTC)
+    metadata_payload = metadata or {}
+
+    if state.postgres_pool is not None:
+        try:
+            async with state.postgres_pool.acquire() as connection:
+                await connection.execute(
+                    """
+                    INSERT INTO thread_events(
+                        application_id, thread_id, profile_id, role, channel,
+                        content, run_id, trace_id, metadata, created_at
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)
+                    """,
+                    application_id,
+                    thread_id,
+                    profile_id,
+                    role,
+                    channel,
+                    content,
+                    run_id,
+                    trace_id,
+                    json.dumps(metadata_payload),
+                    captured_at,
+                )
+        except Exception:
+            pass
+
+    if state.redis_client is not None:
+        try:
+            key = f"thread:{thread_id}:history"
+            entry = {
+                "application_id": application_id,
+                "thread_id": thread_id,
+                "profile_id": profile_id,
+                "role": role,
+                "channel": channel,
+                "content": content,
+                "run_id": run_id,
+                "trace_id": trace_id,
+                "metadata": metadata_payload,
+                "created_at": captured_at.isoformat(),
+            }
+            await state.redis_client.rpush(key, json.dumps(entry))
+            await state.redis_client.ltrim(key, -500, -1)
+            await state.redis_client.set(
+                f"thread:{thread_id}:last_seen",
+                captured_at.isoformat(),
+            )
+        except Exception:
+            pass
+
+
+async def _fetch_thread_history(thread_id: str, limit: int = 200) -> list[dict[str, Any]]:
+    bounded_limit = max(1, min(limit, 1000))
+    collected: list[dict[str, Any]] = []
+
+    if state.postgres_pool is not None:
+        try:
+            async with state.postgres_pool.acquire() as connection:
+                rows = await connection.fetch(
+                    """
+                    SELECT application_id, thread_id, profile_id, role, channel,
+                           content, run_id, trace_id, metadata, created_at
+                    FROM thread_events
+                    WHERE thread_id = $1
+                    ORDER BY created_at DESC
+                    LIMIT $2
+                    """,
+                    thread_id,
+                    bounded_limit,
+                )
+            for row in reversed(rows):
+                metadata_value = row["metadata"] if isinstance(row["metadata"], dict) else {}
+                collected.append(
+                    {
+                        "application_id": str(row["application_id"]),
+                        "thread_id": str(row["thread_id"]),
+                        "profile_id": row["profile_id"],
+                        "role": str(row["role"]),
+                        "channel": str(row["channel"]),
+                        "content": str(row["content"]),
+                        "run_id": row["run_id"],
+                        "trace_id": row["trace_id"],
+                        "metadata": metadata_value,
+                        "created_at": row["created_at"],
+                    }
+                )
+        except Exception:
+            collected = []
+
+    if collected:
+        return collected
+
+    if state.redis_client is None:
+        return []
+
+    try:
+        payloads = await state.redis_client.lrange(f"thread:{thread_id}:history", -bounded_limit, -1)
+    except Exception:
+        return []
+
+    for raw in payloads:
+        try:
+            entry = json.loads(raw)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        created_raw = entry.get("created_at")
+        created_at = datetime.now(UTC)
+        if isinstance(created_raw, str):
+            try:
+                created_at = datetime.fromisoformat(created_raw)
+            except ValueError:
+                created_at = datetime.now(UTC)
+        metadata_value = entry.get("metadata")
+        if not isinstance(metadata_value, dict):
+            metadata_value = {}
+        collected.append(
+            {
+                "application_id": str(entry.get("application_id", "")),
+                "thread_id": str(entry.get("thread_id", thread_id)),
+                "profile_id": entry.get("profile_id"),
+                "role": str(entry.get("role", "system")),
+                "channel": str(entry.get("channel", "event")),
+                "content": str(entry.get("content", "")),
+                "run_id": entry.get("run_id"),
+                "trace_id": entry.get("trace_id"),
+                "metadata": metadata_value,
+                "created_at": created_at,
+            }
+        )
+    return collected
+
+
+def _chunk_text(text: str, chunk_size: int = 48) -> list[str]:
+    return [text[idx : idx + chunk_size] for idx in range(0, len(text), chunk_size)]
+
+
+def _to_int(value: Any) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _extract_model_name(message: AIMessage) -> str | None:
+    response_metadata = getattr(message, "response_metadata", None)
+    if isinstance(response_metadata, dict):
+        for key in ("model", "model_name", "model_id"):
+            candidate = response_metadata.get(key)
+            if isinstance(candidate, str) and candidate:
+                return candidate
+
+    additional_kwargs = getattr(message, "additional_kwargs", None)
+    if isinstance(additional_kwargs, dict):
+        for key in ("model", "model_name", "model_id"):
+            candidate = additional_kwargs.get(key)
+            if isinstance(candidate, str) and candidate:
+                return candidate
+    return None
+
+
+def _extract_token_usage(assistant_messages: list[AIMessage]) -> dict[str, int]:
+    prompt_tokens = 0
+    completion_tokens = 0
+    total_tokens = 0
+
+    for message in assistant_messages:
+        response_metadata = getattr(message, "response_metadata", {})
+        usage_payload: dict[str, Any] | None = None
+
+        usage_metadata = getattr(message, "usage_metadata", None)
+        if isinstance(usage_metadata, dict):
+            usage_payload = usage_metadata
+
+        if usage_payload is None and isinstance(response_metadata, dict):
+            nested_usage = response_metadata.get("token_usage") or response_metadata.get("usage")
+            if isinstance(nested_usage, dict):
+                usage_payload = nested_usage
+
+        prompt = 0
+        completion = 0
+        total = 0
+
+        if isinstance(usage_payload, dict):
+            prompt = _to_int(usage_payload.get("input_tokens") or usage_payload.get("prompt_tokens"))
+            completion = _to_int(
+                usage_payload.get("output_tokens") or usage_payload.get("completion_tokens")
+            )
+            total = _to_int(usage_payload.get("total_tokens"))
+
+        if isinstance(response_metadata, dict) and prompt == 0 and completion == 0:
+            prompt = _to_int(response_metadata.get("prompt_eval_count"))
+            completion = _to_int(response_metadata.get("eval_count"))
+
+        if total == 0:
+            total = prompt + completion
+
+        prompt_tokens += prompt
+        completion_tokens += completion
+        total_tokens += total
+
+    return {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def _extract_tool_calls(assistant_messages: list[AIMessage]) -> list[dict[str, Any]]:
+    tool_calls: list[dict[str, Any]] = []
+    for message in assistant_messages:
+        current_calls = getattr(message, "tool_calls", None)
+        if not isinstance(current_calls, list):
+            continue
+        for call in current_calls:
+            if not isinstance(call, dict):
+                continue
+            args = call.get("args", {})
+            tool_calls.append(
+                {
+                    "id": str(call.get("id", "")),
+                    "name": str(call.get("name", "unknown")),
+                    "type": str(call.get("type", "tool_call")),
+                    "args": args if isinstance(args, dict) else {"value": str(args)},
+                }
+            )
+    return tool_calls
+
+
+def _build_run_diagnostics(
+    *,
+    request: AgentRunRequest,
+    run_id: str,
+    trace_id: str,
+    status: str,
+    started_at: datetime,
+    finished_at: datetime | None = None,
+    model_selected: str | None = None,
+    token_usage: dict[str, int] | None = None,
+    tool_calls: list[dict[str, Any]] | None = None,
+    assistant_message_count: int = 0,
+    tool_message_count: int = 0,
+    reasoning_chunk_count: int = 0,
+    content_chunk_count: int = 0,
+    output_characters: int = 0,
+    output_preview: str | None = None,
+    error: str | None = None,
+) -> dict[str, Any]:
+    latency_ms = None
+    if finished_at is not None:
+        latency_ms = int((finished_at - started_at).total_seconds() * 1000)
+
+    return {
+        "run_id": run_id,
+        "trace_id": trace_id,
+        "name": "langgraph_agent_run",
+        "run_type": "chain",
+        "status": status,
+        "application_id": request.application_id,
+        "thread_id": request.thread_id,
+        "profile_id": request.profile_id,
+        "langsmith_project": settings.langsmith_project,
+        "langsmith_endpoint": getenv("LANGSMITH_ENDPOINT"),
+        "langsmith_tracing_enabled": settings.langsmith_tracing,
+        "model_provider": "ollama",
+        "model_primary": settings.ollama_primary_model,
+        "model_fallbacks": [
+            settings.ollama_fallback_cloud_model,
+            settings.ollama_fallback_local_model,
+        ],
+        "model_selected": model_selected,
+        "token_usage": token_usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+        "tool_calls": tool_calls or [],
+        "tool_call_count": len(tool_calls or []),
+        "assistant_message_count": assistant_message_count,
+        "tool_message_count": tool_message_count,
+        "reasoning_chunk_count": reasoning_chunk_count,
+        "content_chunk_count": content_chunk_count,
+        "output_characters": output_characters,
+        "input_preview": request.message[:240],
+        "output_preview": output_preview[:240] if output_preview else None,
+        "started_at": started_at.isoformat(),
+        "finished_at": finished_at.isoformat() if finished_at is not None else None,
+        "latency_ms": latency_ms,
+        "error": error,
+        "tags": ["langgraph", "streaming", "tui-compatible"],
+    }
+
+
+async def _invoke_agent(
+    request: AgentRunRequest,
+    *,
+    run_id: str,
+    trace_id: str,
+    started_at: datetime,
+) -> tuple[str, list[str], dict[str, Any]]:
+    if state.agent_graph is None:
+        message = "Agent graph not initialized"
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "message": message,
+                "run": _build_run_diagnostics(
+                    request=request,
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    status="error",
+                    started_at=started_at,
+                    finished_at=datetime.now(UTC),
+                    error=message,
+                ),
+            },
+        )
+
+    try:
+        result = await state.agent_graph.ainvoke(
+            {
+                "messages": [{"role": "user", "content": request.message}],
+                "application_id": request.application_id,
+                "thread_id": request.thread_id,
+                "profile_id": request.profile_id,
+            },
+            config={
+                "configurable": {
+                    "thread_id": request.thread_id,
+                    "application_id": request.application_id,
+                    "profile_id": request.profile_id,
+                }
+            },
+        )
+    except Exception as exc:
+        message = f"Agent invocation failed: {exc}"
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": message,
+                "run": _build_run_diagnostics(
+                    request=request,
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    status="error",
+                    started_at=started_at,
+                    finished_at=datetime.now(UTC),
+                    error=message,
+                ),
+            },
+        ) from exc
+
+    messages: list[BaseMessage] = result.get("messages", [])
+    assistant_messages = [msg for msg in messages if isinstance(msg, AIMessage)]
+    tool_messages = [coerce_message_content(msg.content) for msg in messages if isinstance(msg, ToolMessage)]
+
+    if not assistant_messages:
+        message = "Agent response did not include an assistant message"
+        raise HTTPException(
+            status_code=502,
+            detail={
+                "message": message,
+                "run": _build_run_diagnostics(
+                    request=request,
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    status="error",
+                    started_at=started_at,
+                    finished_at=datetime.now(UTC),
+                    assistant_message_count=0,
+                    tool_message_count=len(tool_messages),
+                    error=message,
+                ),
+            },
+        )
+
+    final_message = assistant_messages[-1]
+    answer_markdown = coerce_message_content(final_message.content)
+    selected_model = _extract_model_name(final_message)
+    if selected_model is None:
+        for assistant_message in reversed(assistant_messages):
+            selected_model = _extract_model_name(assistant_message)
+            if selected_model:
+                break
+
+    run = _build_run_diagnostics(
+        request=request,
+        run_id=run_id,
+        trace_id=trace_id,
+        status="completed",
+        started_at=started_at,
+        finished_at=datetime.now(UTC),
+        model_selected=selected_model,
+        token_usage=_extract_token_usage(assistant_messages),
+        tool_calls=_extract_tool_calls(assistant_messages),
+        assistant_message_count=len(assistant_messages),
+        tool_message_count=len(tool_messages),
+        output_characters=len(answer_markdown),
+        output_preview=answer_markdown,
+    )
+    return answer_markdown, tool_messages, run
+
+
+async def _agent_event_stream(request: AgentRunRequest) -> AsyncIterator[bytes]:
+    run_id = f"run_{uuid4()}"
+    trace_id = str(uuid4())
+    started_at = datetime.now(UTC)
+
+    initial_run = _build_run_diagnostics(
+        request=request,
+        run_id=run_id,
+        trace_id=trace_id,
+        status="running",
+        started_at=started_at,
+    )
+    initial = _build_event(
+        event_type="status",
+        stream_state="queued",
+        application_id=request.application_id,
+        thread_id=request.thread_id,
+        payload={"message": "agent_run_started", "run": initial_run},
+    )
+    yield f"{initial.model_dump_json()}\n".encode()
+    await _persist_history_entry(
+        application_id=request.application_id,
+        thread_id=request.thread_id,
+        profile_id=request.profile_id,
+        role="user",
+        channel="transcript",
+        content=request.message,
+        run_id=run_id,
+        trace_id=trace_id,
+        metadata={"source": "agent_stream"},
+    )
+
+    if state.agent_graph is None:
+        message = "Agent graph not initialized"
+        run = _build_run_diagnostics(
+            request=request,
+            run_id=run_id,
+            trace_id=trace_id,
+            status="error",
+            started_at=started_at,
+            finished_at=datetime.now(UTC),
+            error=message,
+        )
+        error_event = _build_event(
+            event_type="error",
+            stream_state="error",
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            payload={"message": message, "run": run},
+        )
+        yield f"{error_event.model_dump_json()}\n".encode()
+        await _persist_history_entry(
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            profile_id=request.profile_id,
+            role="system",
+            channel="error",
+            content=message,
+            run_id=run_id,
+            trace_id=trace_id,
+            metadata={"run": run},
+        )
+        return
+
+    graph_payload = {
+        "messages": [{"role": "user", "content": request.message}],
+        "application_id": request.application_id,
+        "thread_id": request.thread_id,
+        "profile_id": request.profile_id,
+    }
+    graph_config = {
+        "configurable": {
+            "thread_id": request.thread_id,
+            "application_id": request.application_id,
+            "profile_id": request.profile_id,
+        }
+    }
+
+    assistant_messages: list[AIMessage] = []
+    tool_messages: list[str] = []
+    answer_parts: list[str] = []
+    reasoning_chunk_count = 0
+    content_chunk_count = 0
+
+    try:
+        async for stream_event in state.agent_graph.astream_events(
+            graph_payload,
+            config=graph_config,
+            version="v2",
+        ):
+            event_name = str(stream_event.get("event", ""))
+            payload = stream_event.get("data", {})
+            if not isinstance(payload, dict):
+                continue
+
+            if event_name == "on_tool_end":
+                raw_output = payload.get("output")
+                reasoning_text = coerce_message_content(getattr(raw_output, "content", raw_output))
+                if not reasoning_text:
+                    continue
+                tool_messages.append(reasoning_text)
+                for reasoning_chunk in _chunk_text(reasoning_text):
+                    reasoning_chunk_count += 1
+                    reasoning_event = _build_event(
+                        event_type="reasoning",
+                        stream_state="reasoning",
+                        application_id=request.application_id,
+                        thread_id=request.thread_id,
+                        payload={"delta": reasoning_chunk},
+                    )
+                    yield f"{reasoning_event.model_dump_json()}\n".encode()
+                continue
+
+            if event_name == "on_chat_model_stream":
+                chunk = payload.get("chunk")
+                if chunk is None:
+                    continue
+                delta = coerce_message_content(getattr(chunk, "content", chunk))
+                if not delta:
+                    continue
+                answer_parts.append(delta)
+                content_chunk_count += 1
+                content_event = _build_event(
+                    event_type="content",
+                    stream_state="generating",
+                    application_id=request.application_id,
+                    thread_id=request.thread_id,
+                    payload={"delta": delta},
+                )
+                yield f"{content_event.model_dump_json()}\n".encode()
+                continue
+
+            if event_name == "on_chat_model_end":
+                output = payload.get("output")
+                if isinstance(output, AIMessage):
+                    assistant_messages.append(output)
+                elif isinstance(output, dict):
+                    candidate = output.get("message") or output.get("output")
+                    if isinstance(candidate, AIMessage):
+                        assistant_messages.append(candidate)
+    except Exception as exc:
+        message = f"Agent stream failed: {exc}"
+        run = _build_run_diagnostics(
+            request=request,
+            run_id=run_id,
+            trace_id=trace_id,
+            status="error",
+            started_at=started_at,
+            finished_at=datetime.now(UTC),
+            assistant_message_count=len(assistant_messages),
+            tool_message_count=len(tool_messages),
+            reasoning_chunk_count=reasoning_chunk_count,
+            content_chunk_count=content_chunk_count,
+            output_characters=len("".join(answer_parts)),
+            output_preview="".join(answer_parts),
+            error=message,
+        )
+        error_event = _build_event(
+            event_type="error",
+            stream_state="error",
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            payload={"message": message, "run": run},
+        )
+        yield f"{error_event.model_dump_json()}\n".encode()
+        await _persist_history_entry(
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            profile_id=request.profile_id,
+            role="system",
+            channel="error",
+            content=message,
+            run_id=run_id,
+            trace_id=trace_id,
+            metadata={"run": run},
+        )
+        return
+
+    answer_markdown = "".join(answer_parts)
+
+    if not answer_markdown and assistant_messages:
+        answer_markdown = coerce_message_content(assistant_messages[-1].content)
+        if answer_markdown:
+            content_chunk_count += 1
+            content_event = _build_event(
+                event_type="content",
+                stream_state="generating",
+                application_id=request.application_id,
+                thread_id=request.thread_id,
+                payload={"delta": answer_markdown},
+            )
+            yield f"{content_event.model_dump_json()}\n".encode()
+
+    if not assistant_messages and not answer_markdown:
+        try:
+            fallback_answer, fallback_tool_messages, fallback_run = await _invoke_agent(
+                request,
+                run_id=run_id,
+                trace_id=trace_id,
+                started_at=started_at,
+            )
+        except HTTPException as exc:
+            error_message = str(exc.detail)
+            fallback_error_run = _build_run_diagnostics(
+                request=request,
+                run_id=run_id,
+                trace_id=trace_id,
+                status="error",
+                started_at=started_at,
+                finished_at=datetime.now(UTC),
+                error=error_message,
+            )
+            if isinstance(exc.detail, dict):
+                error_message = str(exc.detail.get("message", error_message))
+                detail_run = exc.detail.get("run")
+                if isinstance(detail_run, dict):
+                    fallback_error_run = detail_run
+
+            error_event = _build_event(
+                event_type="error",
+                stream_state="error",
+                application_id=request.application_id,
+                thread_id=request.thread_id,
+                payload={"message": error_message, "run": fallback_error_run},
+            )
+            yield f"{error_event.model_dump_json()}\n".encode()
+            await _persist_history_entry(
+                application_id=request.application_id,
+                thread_id=request.thread_id,
+                profile_id=request.profile_id,
+                role="system",
+                channel="error",
+                content=error_message,
+                run_id=run_id,
+                trace_id=trace_id,
+                metadata={"run": fallback_error_run},
+            )
+            return
+
+        for tool_message in fallback_tool_messages:
+            for reasoning_chunk in _chunk_text(tool_message):
+                reasoning_chunk_count += 1
+                reasoning_event = _build_event(
+                    event_type="reasoning",
+                    stream_state="reasoning",
+                    application_id=request.application_id,
+                    thread_id=request.thread_id,
+                    payload={"delta": reasoning_chunk},
+                )
+                yield f"{reasoning_event.model_dump_json()}\n".encode()
+
+        if fallback_answer:
+            for content_chunk in _chunk_text(fallback_answer):
+                content_chunk_count += 1
+                content_event = _build_event(
+                    event_type="content",
+                    stream_state="generating",
+                    application_id=request.application_id,
+                    thread_id=request.thread_id,
+                    payload={"delta": content_chunk},
+                )
+                yield f"{content_event.model_dump_json()}\n".encode()
+
+        fallback_run["reasoning_chunk_count"] = reasoning_chunk_count
+        fallback_run["content_chunk_count"] = content_chunk_count
+        fallback_run["output_characters"] = len(fallback_answer)
+
+        completion = _build_event(
+            event_type="complete",
+            stream_state="completed",
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            payload={"message": "completed", "run": fallback_run},
+        )
+        yield f"{completion.model_dump_json()}\n".encode()
+        await _persist_history_entry(
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            profile_id=request.profile_id,
+            role="assistant",
+            channel="transcript",
+            content=fallback_answer,
+            run_id=run_id,
+            trace_id=trace_id,
+            metadata={"streamed": True},
+        )
+        if fallback_tool_messages:
+            await _persist_history_entry(
+                application_id=request.application_id,
+                thread_id=request.thread_id,
+                profile_id=request.profile_id,
+                role="assistant",
+                channel="reasoning",
+                content="\n\n".join(fallback_tool_messages),
+                run_id=run_id,
+                trace_id=trace_id,
+                metadata={"streamed": True},
+            )
+        await _persist_history_entry(
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            profile_id=request.profile_id,
+            role="system",
+            channel="diagnostics",
+            content="run_diagnostics",
+            run_id=run_id,
+            trace_id=trace_id,
+            metadata={"run": fallback_run},
+        )
+        return
+
+    selected_model = None
+    for assistant_message in reversed(assistant_messages):
+        selected_model = _extract_model_name(assistant_message)
+        if selected_model:
+            break
+
+    run = _build_run_diagnostics(
+        request=request,
+        run_id=run_id,
+        trace_id=trace_id,
+        status="completed",
+        started_at=started_at,
+        finished_at=datetime.now(UTC),
+        model_selected=selected_model,
+        token_usage=_extract_token_usage(assistant_messages),
+        tool_calls=_extract_tool_calls(assistant_messages),
+        assistant_message_count=len(assistant_messages),
+        tool_message_count=len(tool_messages),
+        reasoning_chunk_count=reasoning_chunk_count,
+        content_chunk_count=content_chunk_count,
+        output_characters=len(answer_markdown),
+        output_preview=answer_markdown,
+    )
+
+    completion = _build_event(
+        event_type="complete",
+        stream_state="completed",
+        application_id=request.application_id,
+        thread_id=request.thread_id,
+        payload={"message": "completed", "run": run},
+    )
+    yield f"{completion.model_dump_json()}\n".encode()
+    await _persist_history_entry(
+        application_id=request.application_id,
+        thread_id=request.thread_id,
+        profile_id=request.profile_id,
+        role="assistant",
+        channel="transcript",
+        content=answer_markdown,
+        run_id=run_id,
+        trace_id=trace_id,
+        metadata={"streamed": True},
+    )
+    if tool_messages:
+        await _persist_history_entry(
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            profile_id=request.profile_id,
+            role="assistant",
+            channel="reasoning",
+            content="\n\n".join(tool_messages),
+            run_id=run_id,
+            trace_id=trace_id,
+            metadata={"streamed": True},
+        )
+    await _persist_history_entry(
+        application_id=request.application_id,
+        thread_id=request.thread_id,
+        profile_id=request.profile_id,
+        role="system",
+        channel="diagnostics",
+        content="run_diagnostics",
+        run_id=run_id,
+        trace_id=trace_id,
+        metadata={"run": run},
+    )
+
+    return
+
 
 
 @app.get("/health", response_model=HealthResponse)
@@ -159,45 +1030,101 @@ async def create_or_get_thread(request: ThreadRequest) -> ThreadResponse:
     )
 
 
+@app.get("/threads/{thread_id}/history", response_model=ThreadHistoryResponse)
+async def get_thread_history(thread_id: str, limit: int = 200) -> ThreadHistoryResponse:
+    rows = await _fetch_thread_history(thread_id, limit=limit)
+    entries = [
+        ThreadHistoryEntry(
+            application_id=row["application_id"],
+            thread_id=row["thread_id"],
+            profile_id=row["profile_id"],
+            role=row["role"],
+            channel=row["channel"],
+            content=row["content"],
+            run_id=row["run_id"],
+            trace_id=row["trace_id"],
+            metadata=row["metadata"],
+            created_at=row["created_at"],
+        )
+        for row in rows
+    ]
+    return ThreadHistoryResponse(
+        thread_id=thread_id,
+        entries=entries,
+        count=len(entries),
+    )
+
+
 @app.post("/agent/runs", response_model=AgentRunResponse)
 async def run_agent(request: AgentRunRequest) -> AgentRunResponse:
-    if state.agent_graph is None:
-        raise HTTPException(status_code=503, detail="Agent graph not initialized")
-
-    try:
-        result = await state.agent_graph.ainvoke(
-            {
-                "messages": [{"role": "user", "content": request.message}],
-                "application_id": request.application_id,
-                "thread_id": request.thread_id,
-                "profile_id": request.profile_id,
-            },
-            config={
-                "configurable": {
-                    "thread_id": request.thread_id,
-                    "application_id": request.application_id,
-                    "profile_id": request.profile_id,
-                }
-            },
+    run_id = f"run_{uuid4()}"
+    trace_id = str(uuid4())
+    started_at = datetime.now(UTC)
+    answer_markdown, tool_messages, run = await _invoke_agent(
+        request,
+        run_id=run_id,
+        trace_id=trace_id,
+        started_at=started_at,
+    )
+    await _persist_history_entry(
+        application_id=request.application_id,
+        thread_id=request.thread_id,
+        profile_id=request.profile_id,
+        role="user",
+        channel="transcript",
+        content=request.message,
+        run_id=run_id,
+        trace_id=trace_id,
+        metadata={"source": "agent_runs"},
+    )
+    await _persist_history_entry(
+        application_id=request.application_id,
+        thread_id=request.thread_id,
+        profile_id=request.profile_id,
+        role="assistant",
+        channel="transcript",
+        content=answer_markdown,
+        run_id=run_id,
+        trace_id=trace_id,
+        metadata={"source": "agent_runs"},
+    )
+    if tool_messages:
+        await _persist_history_entry(
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            profile_id=request.profile_id,
+            role="assistant",
+            channel="reasoning",
+            content="\n\n".join(tool_messages),
+            run_id=run_id,
+            trace_id=trace_id,
+            metadata={"source": "agent_runs"},
         )
-    except Exception as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Agent invocation failed: {exc}",
-        ) from exc
+    await _persist_history_entry(
+        application_id=request.application_id,
+        thread_id=request.thread_id,
+        profile_id=request.profile_id,
+        role="system",
+        channel="diagnostics",
+        content="run_diagnostics",
+        run_id=run_id,
+        trace_id=trace_id,
+        metadata={"run": run},
+    )
 
-    messages: list[BaseMessage] = result.get("messages", [])
-    assistant_messages = [msg for msg in messages if isinstance(msg, AIMessage)]
-    tool_messages = [coerce_message_content(msg.content) for msg in messages if isinstance(msg, ToolMessage)]
-
-    if not assistant_messages:
-        raise HTTPException(status_code=502, detail="Agent response did not include an assistant message")
-
-    final_message = assistant_messages[-1]
     return AgentRunResponse(
         application_id=request.application_id,
         thread_id=request.thread_id,
-        answer_markdown=coerce_message_content(final_message.content),
+        answer_markdown=answer_markdown,
         tool_messages=tool_messages,
+        run=run,
         captured_at=datetime.now(UTC),
+    )
+
+
+@app.post("/agent/stream")
+async def stream_agent_run(request: AgentRunRequest) -> StreamingResponse:
+    return StreamingResponse(
+        _agent_event_stream(request),
+        media_type="application/x-ndjson",
     )
