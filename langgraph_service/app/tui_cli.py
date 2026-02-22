@@ -544,11 +544,19 @@ class LangGraphTui:
 
     def _build_export_text(self, scope: str) -> str:
         timestamp = datetime.now(UTC).isoformat()
+        context_line = (
+            f"app={self.application_id} "
+            f"thread={self.thread_id or '-'} "
+            f"profile={self.profile_id or '-'} "
+            f"service={self.base_url} "
+            f"focused_panel={self._focused_panel()} "
+            f"active_run={self._active_run_id or '-'}"
+        )
         if scope == "focused":
             panel = self._focused_panel()
             title = self._panel_title(panel)
             body = "\n".join(self._panel_content_lines(panel))
-            return f"[{timestamp}] {title}\n{body}\n"
+            return f"[{timestamp}] {context_line}\n## {title}\n{body}\n"
 
         blocks: list[str] = []
         for panel in [
@@ -562,7 +570,7 @@ class LangGraphTui:
             title = self._panel_title(panel)
             body = "\n".join(self._panel_content_lines(panel))
             blocks.append(f"## {title}\n{body}")
-        return f"[{timestamp}] tui_snapshot\n\n" + "\n\n".join(blocks) + "\n"
+        return f"[{timestamp}] {context_line}\n\n" + "\n\n".join(blocks) + "\n"
 
     @staticmethod
     def _copy_text_to_clipboard(text: str) -> bool:

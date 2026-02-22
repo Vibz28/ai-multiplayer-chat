@@ -175,6 +175,22 @@ def test_export_text_contains_panel_content(tmp_path) -> None:
     assert "hello" in snapshot
 
 
+def test_focused_copy_includes_context_ids(tmp_path) -> None:
+    app = LangGraphTui(
+        base_url="http://localhost:8080",
+        application_id="cli-app",
+        profile_id="cli-user",
+        thread_id="thread-xyz",
+        log_file=tmp_path / "events.jsonl",
+    )
+    app._set_focus_panel(app.PANEL_INPUT)
+    app._input_buffer = "hello"
+    focused = app._build_export_text("focused")
+    assert "app=cli-app" in focused
+    assert "thread=thread-xyz" in focused
+    assert "## Chat Input" in focused
+
+
 def test_tui_preserves_stream_output_after_completion(tmp_path) -> None:
     app = LangGraphTui(
         base_url="http://localhost:8080",

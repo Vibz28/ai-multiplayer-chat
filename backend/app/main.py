@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from app.config import get_settings
 from app.dependencies import (
+    get_history_service,
     get_langgraph_client,
     get_mapping_repository,
     get_session_service,
@@ -17,11 +18,13 @@ from app.event_schema import normalize_event
 from app.models import (
     HealthCheckResponse,
     SessionCreateRequest,
+    SessionHistoryResponse,
     SessionResponse,
     ThreadResponse,
     WebSocketInboundMessage,
 )
 from app.repositories.mapping_repository import MappingNotFoundError
+from app.services.history_service import CanonicalHistoryService
 from app.services.langgraph_client import LangGraphClientError
 from app.services.session_service import SessionService
 from app.services.websocket_hub import WebSocketHub
@@ -46,7 +49,10 @@ def _session_response(record) -> SessionResponse:
     return SessionResponse(
         application_id=record.application_id,
         profile_id=record.profile_id,
+        role=record.role,
         langgraph_thread_id=record.langgraph_thread_id,
+        workflow_id=record.workflow_id,
+        langsmith_trace_id=record.langsmith_trace_id,
         created_at=record.created_at,
         updated_at=record.updated_at,
     )
@@ -80,7 +86,10 @@ async def create_session(
     request: SessionCreateRequest,
     service: SessionService = Depends(get_session_service),
 ) -> SessionResponse:
-    created = await service.create_session(profile_id=request.profile_id)
+    created = await service.create_session(
+        profile_id=request.profile_id,
+        role=request.role,
+    )
     return _session_response(created)
 
 
@@ -113,8 +122,27 @@ async def resolve_thread(
     return ThreadResponse(
         application_id=mapping.application_id,
         langgraph_thread_id=mapping.langgraph_thread_id,
+        workflow_id=mapping.workflow_id,
+        langsmith_trace_id=mapping.langsmith_trace_id,
         updated_at=mapping.updated_at,
     )
+
+
+@app.get("/v1/sessions/{application_id}/history", response_model=SessionHistoryResponse)
+async def get_session_history(
+    application_id: str,
+    limit: int = 200,
+    history_service: CanonicalHistoryService = Depends(get_history_service),
+) -> SessionHistoryResponse:
+    try:
+        return await history_service.get_application_history(
+            application_id=application_id,
+            limit=limit,
+        )
+    except MappingNotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Session or thread not found") from exc
+    except LangGraphClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.websocket("/ws/{application_id}")
@@ -123,6 +151,7 @@ async def websocket_chat(
     websocket: WebSocket,
     service: SessionService = Depends(get_session_service),
     hub: WebSocketHub = Depends(get_websocket_hub),
+    repository=Depends(get_mapping_repository),
     langgraph_client=Depends(get_langgraph_client),
 ) -> None:
     existing = await service.get_session(application_id)
@@ -245,6 +274,24 @@ async def websocket_chat(
                     upstream_payload = upstream_event.get("payload", {})
                     if not isinstance(upstream_payload, dict):
                         upstream_payload = {"value": upstream_payload}
+
+                    run_payload = upstream_payload.get("run")
+                    if isinstance(run_payload, dict):
+                        workflow_id = run_payload.get("run_id")
+                        trace_id = run_payload.get("trace_id")
+                        safe_workflow = workflow_id if isinstance(workflow_id, str) else None
+                        safe_trace = trace_id if isinstance(trace_id, str) else None
+                        if safe_workflow is not None or safe_trace is not None:
+                            try:
+                                await run_in_threadpool(
+                                    repository.upsert_workflow_metadata,
+                                    application_id,
+                                    safe_workflow,
+                                    safe_trace,
+                                )
+                            except Exception:
+                                pass
+
                     await hub.emit(
                         application_id,
                         normalize_event(

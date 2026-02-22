@@ -27,3 +27,12 @@ Reason for recommendation: infrastructure and environment details are easier to 
 - Additional requirement: include `langgraph`, `langchain`, `langsmith`, and related CLI tooling for graph execution and traceability.
 
 Reason for recommendation: ensures deployment-parity behavior while preserving test reliability.
+
+## Decision 5: Canonical Data Stores Across Services
+
+- Selected:
+  - Central Postgres + Redis as canonical runtime/thread/run history stores
+  - DynamoDB scoped to user/session/workflow metadata mapping
+  - Backend abstraction layer for canonical history reads so frontend/backend/agent share one data path
+
+Reason for recommendation: avoids split-brain history state, keeps high-volume conversational logs in relational/cache stores, and keeps DynamoDB focused on durable metadata lookup semantics.
