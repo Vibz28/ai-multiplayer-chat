@@ -4,6 +4,7 @@ import type { FormEvent, RefObject } from 'react'
 import type {
   ChatMessage,
   ChecklistItem,
+  ConversationSummary,
   EventEnvelope,
   Participant,
   RosterParticipant,
@@ -27,6 +28,8 @@ const backendHttpUrl =
 const backendWsUrl = import.meta.env.VITE_BACKEND_WS_URL?.replace(/\/$/, '') ?? 'ws://localhost:8000'
 
 const MAX_EVENT_LOG = 600
+const MAX_RECENT_CONVERSATIONS = 40
+const CONVERSATION_STORAGE_KEY = 'chatlab.recent_conversations.v1'
 
 type DeliveryMode = 'thread' | 'direct'
 
@@ -63,6 +66,7 @@ export type ChatLabController = {
   checklistItems: ChecklistItem[]
   checklistState: 'idle' | 'loading' | 'error'
   isIncognito: boolean
+  conversations: ConversationSummary[]
   transcriptRef: RefObject<HTMLDivElement | null>
   eventLogRef: RefObject<HTMLDivElement | null>
   setSessionProfileId: (value: string) => void
@@ -75,6 +79,7 @@ export type ChatLabController = {
   setMessageInput: (value: string) => void
   createSession: (event: FormEvent) => Promise<void>
   attachSession: (event: FormEvent) => Promise<void>
+  openConversation: (targetApplicationId: string) => Promise<void>
   quickStartSession: () => Promise<void>
   resolveThread: () => Promise<void>
   loadHistory: () => Promise<void>
@@ -91,6 +96,40 @@ export type ChatLabController = {
   sendMessage: (event: FormEvent) => void
   sendConcurrentAiBurst: () => void
   toggleReasoning: (messageId: string) => void
+}
+
+function summarizeText(value: string, maxChars = 90): string {
+  const normalized = value.replace(/\s+/g, ' ').trim()
+  if (!normalized) {
+    return ''
+  }
+  return normalized.length > maxChars ? `${normalized.slice(0, maxChars - 1)}…` : normalized
+}
+
+function titleFromUserPrompt(prompt: string): string {
+  const summarized = summarizeText(prompt, 52)
+  return summarized || 'New conversation'
+}
+
+function safeLoadConversations(): ConversationSummary[] {
+  try {
+    const raw = window.localStorage.getItem(CONVERSATION_STORAGE_KEY)
+    if (!raw) {
+      return []
+    }
+    const parsed = JSON.parse(raw)
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+    return parsed.filter((item): item is ConversationSummary => {
+      if (!item || typeof item !== 'object') {
+        return false
+      }
+      return typeof item.applicationId === 'string' && item.applicationId.length > 0
+    })
+  } catch {
+    return []
+  }
 }
 
 export function useChatLabController(): ChatLabController {
@@ -134,11 +173,16 @@ export function useChatLabController(): ChatLabController {
   const [checklistItems, setChecklistItems] = useState<ChecklistItem[]>([])
   const [checklistState, setChecklistState] = useState<'idle' | 'loading' | 'error'>('idle')
   const [isIncognito, setIsIncognito] = useState(false)
+  const [conversations, setConversations] = useState<ConversationSummary[]>(() =>
+    safeLoadConversations(),
+  )
 
   const socketsRef = useRef<Map<string, WebSocket>>(new Map())
   const seenEventKeysRef = useRef<Set<string>>(new Set())
   const activeAssistantByRunRef = useRef<Map<string, string>>(new Map())
   const activeAssistantFallbackIdRef = useRef<string | null>(null)
+  const assistantPreviewByRunRef = useRef<Map<string, string>>(new Map())
+  const urlAttachHandledRef = useRef(false)
 
   const transcriptRef = useRef<HTMLDivElement | null>(null)
   const eventLogRef = useRef<HTMLDivElement | null>(null)
@@ -171,6 +215,20 @@ export function useChatLabController(): ChatLabController {
       sockets.clear()
     }
   }, [])
+
+  useEffect(() => {
+    window.localStorage.setItem(CONVERSATION_STORAGE_KEY, JSON.stringify(conversations))
+  }, [conversations])
+
+  useEffect(() => {
+    const url = new URL(window.location.href)
+    if (applicationId) {
+      url.searchParams.set('app', applicationId)
+    } else {
+      url.searchParams.delete('app')
+    }
+    window.history.replaceState({}, '', `${url.pathname}${url.search}${url.hash}`)
+  }, [applicationId])
 
   const connectedParticipantIds = useMemo(
     () =>
@@ -218,6 +276,32 @@ export function useChatLabController(): ChatLabController {
     }
     return 'connected'
   }, [participants])
+
+  const upsertConversation = (targetApplicationId: string, patch: Partial<ConversationSummary>) => {
+    const now = new Date().toISOString()
+    setConversations((current) => {
+      const existing = current.find((entry) => entry.applicationId === targetApplicationId)
+      const existingTitle = existing?.title ?? 'New conversation'
+      const incomingTitle = patch.title
+      const resolvedTitle =
+        existing && existingTitle !== 'New conversation' && incomingTitle
+          ? existingTitle
+          : incomingTitle ?? existingTitle
+      const next: ConversationSummary = {
+        applicationId: targetApplicationId,
+        title: resolvedTitle,
+        summary: patch.summary ?? existing?.summary ?? 'No AI summary yet.',
+        lastUpdated: patch.lastUpdated ?? now,
+        threadId: patch.threadId ?? existing?.threadId ?? null,
+        workflowId: patch.workflowId ?? existing?.workflowId ?? null,
+        traceId: patch.traceId ?? existing?.traceId ?? null,
+        activeProfileId: patch.activeProfileId ?? existing?.activeProfileId ?? null,
+        isIncognito: patch.isIncognito ?? existing?.isIncognito ?? false,
+      }
+      const rest = current.filter((entry) => entry.applicationId !== targetApplicationId)
+      return [next, ...rest].slice(0, MAX_RECENT_CONVERSATIONS)
+    })
+  }
 
   const appendEvent = (event: EventEnvelope) => {
     setEvents((current) => {
@@ -323,6 +407,7 @@ export function useChatLabController(): ChatLabController {
     seenEventKeysRef.current.clear()
     activeAssistantByRunRef.current.clear()
     activeAssistantFallbackIdRef.current = null
+    assistantPreviewByRunRef.current.clear()
   }
 
   const clearSockets = () => {
@@ -369,6 +454,11 @@ export function useChatLabController(): ChatLabController {
       setWorkflowId(payload.workflow_id)
       setTraceId(payload.langsmith_trace_id)
       setChecklistState('idle')
+      upsertConversation(targetApplicationId, {
+        threadId: payload.langgraph_thread_id,
+        workflowId: payload.workflow_id,
+        traceId: payload.langsmith_trace_id,
+      })
     } catch {
       setChecklistItems([])
       setChecklistState('error')
@@ -389,6 +479,13 @@ export function useChatLabController(): ChatLabController {
       setTraceId(payload.langsmith_trace_id)
       clearSockets()
       resetSessionRuntime()
+      upsertConversation(payload.application_id, {
+        threadId: payload.langgraph_thread_id,
+        workflowId: payload.workflow_id,
+        traceId: payload.langsmith_trace_id,
+        activeProfileId: payload.profile_id,
+        isIncognito: false,
+      })
       appendSystemMessage(`Session created for ${payload.application_id}`)
       if (payload.langgraph_thread_id) {
         await refreshChecklistForApplication(payload.application_id)
@@ -408,23 +505,25 @@ export function useChatLabController(): ChatLabController {
     }
 
     try {
-      const response = await fetch(`${backendHttpUrl}/v1/sessions/${applicationIdInput.trim()}`)
-      if (!response.ok) {
-        throw new Error(`Session lookup failed with status ${response.status}`)
-      }
-      const payload = (await response.json()) as SessionResponse
-      setApplicationId(payload.application_id)
-      setThreadId(payload.langgraph_thread_id)
-      setWorkflowId(payload.workflow_id)
-      setTraceId(payload.langsmith_trace_id)
-      clearSockets()
-      resetSessionRuntime()
-      appendSystemMessage(`Attached to session ${payload.application_id}`)
-      if (payload.langgraph_thread_id) {
-        await refreshChecklistForApplication(payload.application_id)
-      }
+      await attachSessionById(applicationIdInput.trim(), {
+        announce: `Attached to session ${applicationIdInput.trim()}`,
+      })
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Unknown session attach error')
+    }
+  }
+
+  const openConversation = async (targetApplicationId: string) => {
+    if (!targetApplicationId.trim()) {
+      return
+    }
+    setErrorMessage('')
+    try {
+      await attachSessionById(targetApplicationId.trim(), {
+        announce: `Opened conversation ${targetApplicationId.trim()}`,
+      })
+    } catch (error) {
+      setErrorMessage(error instanceof Error ? error.message : 'Unable to open conversation')
     }
   }
 
@@ -436,6 +535,38 @@ export function useChatLabController(): ChatLabController {
       throw new Error(`Thread resolution failed with status ${response.status}`)
     }
     return (await response.json()) as ThreadResponse
+  }
+
+  const attachSessionById = async (
+    targetApplicationId: string,
+    options?: { announce?: string },
+  ) => {
+    const response = await fetch(`${backendHttpUrl}/v1/sessions/${targetApplicationId}`)
+    if (!response.ok) {
+      throw new Error(`Session lookup failed with status ${response.status}`)
+    }
+    const payload = (await response.json()) as SessionResponse
+    setApplicationId(payload.application_id)
+    setApplicationIdInput(payload.application_id)
+    setThreadId(payload.langgraph_thread_id)
+    setWorkflowId(payload.workflow_id)
+    setTraceId(payload.langsmith_trace_id)
+    clearSockets()
+    resetSessionRuntime()
+    upsertConversation(payload.application_id, {
+      threadId: payload.langgraph_thread_id,
+      workflowId: payload.workflow_id,
+      traceId: payload.langsmith_trace_id,
+      activeProfileId: payload.profile_id,
+      isIncognito,
+    })
+    if (options?.announce) {
+      appendSystemMessage(options.announce)
+    }
+    if (payload.langgraph_thread_id) {
+      await refreshChecklistForApplication(payload.application_id)
+      await loadHistoryByApplication(payload.application_id)
+    }
   }
 
   const resolveThread = async () => {
@@ -450,6 +581,11 @@ export function useChatLabController(): ChatLabController {
       setThreadId(payload.langgraph_thread_id)
       setWorkflowId(payload.workflow_id)
       setTraceId(payload.langsmith_trace_id)
+      upsertConversation(applicationId, {
+        threadId: payload.langgraph_thread_id,
+        workflowId: payload.workflow_id,
+        traceId: payload.langsmith_trace_id,
+      })
       appendSystemMessage(`Thread ready: ${payload.langgraph_thread_id}`)
       await refreshChecklistForApplication(applicationId)
     } catch (error) {
@@ -457,14 +593,9 @@ export function useChatLabController(): ChatLabController {
     }
   }
 
-  const loadHistory = async () => {
-    if (!applicationId) {
-      setErrorMessage('No active application ID')
-      return
-    }
-    setErrorMessage('')
+  const loadHistoryByApplication = async (targetApplicationId: string) => {
     try {
-      const response = await fetch(`${backendHttpUrl}/v1/sessions/${applicationId}/history?limit=300`)
+      const response = await fetch(`${backendHttpUrl}/v1/sessions/${targetApplicationId}/history?limit=300`)
       if (!response.ok) {
         throw new Error(`History fetch failed with status ${response.status}`)
       }
@@ -475,11 +606,26 @@ export function useChatLabController(): ChatLabController {
       setMessages(historyToMessages(payload))
       activeAssistantByRunRef.current.clear()
       activeAssistantFallbackIdRef.current = null
+      assistantPreviewByRunRef.current.clear()
+      upsertConversation(targetApplicationId, {
+        threadId: payload.langgraph_thread_id,
+        workflowId: payload.workflow_id,
+        traceId: payload.langsmith_trace_id,
+      })
       appendSystemMessage(`Loaded ${payload.count} history entries`)
-      await refreshChecklistForApplication(applicationId)
+      await refreshChecklistForApplication(targetApplicationId)
     } catch (error) {
       setErrorMessage(error instanceof Error ? error.message : 'Unknown history fetch error')
     }
+  }
+
+  const loadHistory = async () => {
+    if (!applicationId) {
+      setErrorMessage('No active application ID')
+      return
+    }
+    setErrorMessage('')
+    await loadHistoryByApplication(applicationId)
   }
 
   const refreshChecklist = async () => {
@@ -504,6 +650,13 @@ export function useChatLabController(): ChatLabController {
         setTraceId(sessionPayload.langsmith_trace_id)
         clearSockets()
         resetSessionRuntime()
+        upsertConversation(sessionPayload.application_id, {
+          threadId: sessionPayload.langgraph_thread_id,
+          workflowId: sessionPayload.workflow_id,
+          traceId: sessionPayload.langsmith_trace_id,
+          activeProfileId: sessionPayload.profile_id,
+          isIncognito,
+        })
         appendSystemMessage(`Session created for ${sessionPayload.application_id}`)
         activeApplicationId = sessionPayload.application_id
       }
@@ -511,6 +664,13 @@ export function useChatLabController(): ChatLabController {
       setThreadId(threadPayload.langgraph_thread_id)
       setWorkflowId(threadPayload.workflow_id)
       setTraceId(threadPayload.langsmith_trace_id)
+      upsertConversation(activeApplicationId, {
+        threadId: threadPayload.langgraph_thread_id,
+        workflowId: threadPayload.workflow_id,
+        traceId: threadPayload.langsmith_trace_id,
+        activeProfileId: selectedSender?.profileId ?? null,
+        isIncognito,
+      })
       await refreshChecklistForApplication(activeApplicationId)
       appendSystemMessage(`Quick start ready for ${activeApplicationId}`)
     } catch (error) {
@@ -521,14 +681,9 @@ export function useChatLabController(): ChatLabController {
   const toggleIncognitoMode = async () => {
     if (isIncognito) {
       setIsIncognito(false)
-      clearSockets()
-      resetSessionRuntime()
-      setApplicationId('')
-      setApplicationIdInput('')
-      setThreadId(null)
-      setWorkflowId(null)
-      setTraceId(null)
-      appendSystemMessage('Incognito session closed and local state cleared.')
+      setSessionProfileId('host-user')
+      setSessionRole('member')
+      appendSystemMessage('Incognito mode turned off.')
       return
     }
 
@@ -538,22 +693,17 @@ export function useChatLabController(): ChatLabController {
       setSessionProfileId(profileAlias)
       setSessionRole('member')
       setIsIncognito(true)
-      clearSockets()
-      resetSessionRuntime()
-
-      const payload = await createSessionForProfile(profileAlias, 'member')
-      setApplicationId(payload.application_id)
-      setApplicationIdInput(payload.application_id)
-      setThreadId(payload.langgraph_thread_id)
-      setWorkflowId(payload.workflow_id)
-      setTraceId(payload.langsmith_trace_id)
-
-      const threadPayload = await resolveThreadForApplication(payload.application_id)
-      setThreadId(threadPayload.langgraph_thread_id)
-      setWorkflowId(threadPayload.workflow_id)
-      setTraceId(threadPayload.langsmith_trace_id)
-      await refreshChecklistForApplication(payload.application_id)
-      appendSystemMessage(`Incognito session active for ${profileAlias}.`)
+      if (applicationId) {
+        upsertConversation(applicationId, {
+          activeProfileId: profileAlias,
+          isIncognito: true,
+        })
+      }
+      appendSystemMessage(
+        applicationId
+          ? `Incognito persona active: ${profileAlias}. Join this app from another tab using application_id ${applicationId}.`
+          : `Incognito persona active: ${profileAlias}. Join or create a session to start chatting.`,
+      )
     } catch (error) {
       setIsIncognito(false)
       setErrorMessage(error instanceof Error ? error.message : 'Unable to start incognito session')
@@ -602,6 +752,7 @@ export function useChatLabController(): ChatLabController {
     }
 
     if (event.type === 'user_message') {
+      const prompt = asString(payload.content)
       setMessages((current) => [
         ...current,
         {
@@ -610,7 +761,7 @@ export function useChatLabController(): ChatLabController {
           senderProfileId: asString(payload.profile_id, 'unknown'),
           senderRole: asString(payload.role, 'member'),
           createdAt: event.timestamp,
-          content: asString(payload.content),
+          content: prompt,
           reasoning: '',
           includeAi: payload.include_ai !== false,
           deliveryMode: asString(payload.delivery_mode, 'thread') === 'direct' ? 'direct' : 'thread',
@@ -618,6 +769,16 @@ export function useChatLabController(): ChatLabController {
           complete: true,
         },
       ])
+      if (applicationId) {
+        upsertConversation(applicationId, {
+          title: titleFromUserPrompt(prompt),
+          summary: summarizeText(prompt, 100),
+          lastUpdated: event.timestamp,
+          threadId: event.thread_id ?? threadId,
+          activeProfileId: asString(payload.profile_id, selectedSender?.profileId ?? ''),
+          isIncognito,
+        })
+      }
       if (payload.include_ai === false) {
         setStreamState('idle')
       }
@@ -662,11 +823,47 @@ export function useChatLabController(): ChatLabController {
       return
     }
 
+    if (event.type === 'checklist') {
+      const items = Array.isArray(payload.items) ? payload.items : []
+      const nextItems: ChecklistItem[] = items
+        .filter((item): item is ChecklistItem => {
+          if (!item || typeof item !== 'object') {
+            return false
+          }
+          const candidate = item as ChecklistItem
+          return typeof candidate.index === 'number' && typeof candidate.text === 'string'
+        })
+        .map((item) => ({
+          index: item.index,
+          text: item.text,
+          done: Boolean(item.done),
+        }))
+      setChecklistItems(nextItems)
+      setChecklistState('idle')
+      if (applicationId) {
+        upsertConversation(applicationId, {
+          summary:
+            nextItems.length > 0
+              ? `${nextItems.filter((item) => item.done).length}/${nextItems.length} tasks complete`
+              : 'Checklist cleared',
+          lastUpdated: event.timestamp,
+          threadId: event.thread_id ?? threadId,
+          workflowId: runId || workflowId,
+          traceId: parsedTraceId || traceId,
+        })
+      }
+      return
+    }
+
     if (event.type === 'content') {
       setStreamState('generating')
       const initiatedBy = asString(payload.initiated_by_profile_id, 'assistant')
       const targetId = ensureAssistantDraft({ initiatedBy, runId, traceId: parsedTraceId })
       const delta = asString(payload.delta)
+      const previewKey = runId || targetId
+      const currentPreview = assistantPreviewByRunRef.current.get(previewKey) ?? ''
+      const nextPreview = `${currentPreview}${delta}`
+      assistantPreviewByRunRef.current.set(previewKey, nextPreview)
       setMessages((current) =>
         current.map((message) =>
           message.id === targetId
@@ -679,12 +876,33 @@ export function useChatLabController(): ChatLabController {
             : message,
         ),
       )
+      if (applicationId) {
+        upsertConversation(applicationId, {
+          summary: summarizeText(nextPreview, 100) || 'AI is drafting a response…',
+          lastUpdated: event.timestamp,
+          threadId: event.thread_id ?? threadId,
+          workflowId: runId || workflowId,
+          traceId: parsedTraceId || traceId,
+          isIncognito,
+        })
+      }
       return
     }
 
     if (event.type === 'complete') {
       setStreamState('completed')
       completeAssistantDraft(runId, parsedTraceId)
+      if (runId) {
+        assistantPreviewByRunRef.current.delete(runId)
+      }
+      if (applicationId) {
+        upsertConversation(applicationId, {
+          lastUpdated: event.timestamp,
+          threadId: event.thread_id ?? threadId,
+          workflowId: runId || workflowId,
+          traceId: parsedTraceId || traceId,
+        })
+      }
       void refreshChecklist()
       return
     }
@@ -901,6 +1119,21 @@ export function useChatLabController(): ChatLabController {
     }))
   }
 
+  useEffect(() => {
+    if (urlAttachHandledRef.current) {
+      return
+    }
+    urlAttachHandledRef.current = true
+    const appFromUrl = new URLSearchParams(window.location.search).get('app')
+    if (!appFromUrl) {
+      return
+    }
+    setApplicationIdInput(appFromUrl)
+    void openConversation(appFromUrl)
+    // URL-based auto-attach should run once on first mount only.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   return {
     sessionProfileId,
     sessionRole,
@@ -929,6 +1162,7 @@ export function useChatLabController(): ChatLabController {
     checklistItems,
     checklistState,
     isIncognito,
+    conversations,
     transcriptRef,
     eventLogRef,
     setSessionProfileId,
@@ -941,6 +1175,7 @@ export function useChatLabController(): ChatLabController {
     setMessageInput,
     createSession,
     attachSession,
+    openConversation,
     quickStartSession,
     resolveThread,
     loadHistory,

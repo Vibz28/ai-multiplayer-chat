@@ -23,10 +23,10 @@ export function ParticipantsPanel({
 }: ParticipantsPanelProps) {
   return (
     <article className="panel participants-panel">
-      <h2>Participants</h2>
+      <h2>Participant Routing</h2>
       <p>
-        Each participant holds an independent WebSocket to the same application/thread for
-        multiplayer and queuing tests.
+        Each participant keeps an independent WebSocket to the same application/thread for
+        multiplayer and queueing tests.
       </p>
 
       <div className="participant-list">
@@ -72,7 +72,7 @@ export function ParticipantsPanel({
         Add Participant
       </button>
 
-      <h3>Server Roster</h3>
+      <h3>Connected Roster</h3>
       <ul className="roster-list">
         {roster.length === 0 && <li>no connected participants reported yet</li>}
         {roster.map((participant) => (

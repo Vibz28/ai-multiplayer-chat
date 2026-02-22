@@ -50,7 +50,7 @@ export function ComposerPanel({
     <article className={`composer-panel ${focused ? 'focused' : ''}`}>
       <div className="panel-heading">
         <h2>{focused ? 'Write a Message' : 'Composer'}</h2>
-        <p>Send to everyone or switch to private delivery for direct conversation.</p>
+        <p>Send to everyone, or switch to private delivery for direct conversation.</p>
       </div>
       <form className="composer-form" onSubmit={onSendMessage}>
         <div className="composer-grid">
@@ -115,7 +115,7 @@ export function ComposerPanel({
             Send
           </button>
           <button type="button" className="ghost" onClick={onSendConcurrentAiBurst} disabled={!applicationId}>
-            Run AI concurrency test
+            Burst test (multi-user + AI)
           </button>
         </div>
       </form>

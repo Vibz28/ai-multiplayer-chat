@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
@@ -9,6 +10,7 @@ from fastapi import HTTPException
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 from app.agent import coerce_message_content
+from app.agent_tooling import get_checklist_items
 from app.diagnostics import (
     build_event,
     build_run_diagnostics,
@@ -163,6 +165,28 @@ async def agent_event_stream(request: AgentRunRequest) -> AsyncIterator[bytes]:
     )
     yield f"{initial.model_dump_json()}\n".encode()
 
+    checklist_signature = ""
+
+    def build_checklist_event(stream_state: str) -> bytes | None:
+        nonlocal checklist_signature
+        items = get_checklist_items(request.thread_id)
+        serialized = json.dumps(items, sort_keys=True, separators=(",", ":"))
+        if serialized == checklist_signature:
+            return None
+        checklist_signature = serialized
+        checklist_event = build_event(
+            event_type="checklist",
+            stream_state=stream_state,
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            payload={"items": items, "count": len(items)},
+        )
+        return f"{checklist_event.model_dump_json()}\n".encode()
+
+    initial_checklist = build_checklist_event("queued")
+    if initial_checklist is not None:
+        yield initial_checklist
+
     await persist_history_entry(
         application_id=request.application_id,
         thread_id=request.thread_id,
@@ -240,6 +264,9 @@ async def agent_event_stream(request: AgentRunRequest) -> AsyncIterator[bytes]:
                         payload={"delta": reasoning_chunk},
                     )
                     yield f"{reasoning_event.model_dump_json()}\n".encode()
+                checklist_event = build_checklist_event("reasoning")
+                if checklist_event is not None:
+                    yield checklist_event
                 continue
 
             if event_name == "on_chat_model_stream":
@@ -379,6 +406,9 @@ async def agent_event_stream(request: AgentRunRequest) -> AsyncIterator[bytes]:
                     payload={"delta": reasoning_chunk},
                 )
                 yield f"{reasoning_event.model_dump_json()}\n".encode()
+            checklist_event = build_checklist_event("reasoning")
+            if checklist_event is not None:
+                yield checklist_event
 
         if fallback_answer:
             for content_chunk in chunk_text(fallback_answer):
@@ -395,6 +425,10 @@ async def agent_event_stream(request: AgentRunRequest) -> AsyncIterator[bytes]:
         fallback_run["reasoning_chunk_count"] = reasoning_chunk_count
         fallback_run["content_chunk_count"] = content_chunk_count
         fallback_run["output_characters"] = len(fallback_answer)
+
+        checklist_event = build_checklist_event("completed")
+        if checklist_event is not None:
+            yield checklist_event
 
         completion = build_event(
             event_type="complete",
@@ -472,6 +506,9 @@ async def agent_event_stream(request: AgentRunRequest) -> AsyncIterator[bytes]:
         thread_id=request.thread_id,
         payload={"message": "completed", "run": run},
     )
+    checklist_event = build_checklist_event("completed")
+    if checklist_event is not None:
+        yield checklist_event
     yield f"{completion.model_dump_json()}\n".encode()
 
     await persist_history_entry(

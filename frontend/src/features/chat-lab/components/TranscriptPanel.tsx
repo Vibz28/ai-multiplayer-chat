@@ -36,7 +36,7 @@ export function TranscriptPanel({
   return (
     <article className="transcript-panel">
       <div className="panel-heading">
-        <h2>Conversation</h2>
+        <h2>Thread Feed</h2>
         <p>Real-time discussion between participants and AI.</p>
       </div>
       <div className="message-list" ref={transcriptRef}>

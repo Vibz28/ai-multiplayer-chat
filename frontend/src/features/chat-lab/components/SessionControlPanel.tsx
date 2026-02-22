@@ -40,21 +40,22 @@ export function SessionControlPanel({
   return (
     <article className="panel session-panel">
       <h2>Session Control</h2>
+      <p className="panel-subtext">Create, attach, and inspect thread identity and run metadata.</p>
 
       <form className="session-form" onSubmit={onCreateSession}>
-        <label htmlFor="sessionProfile">session profile</label>
+        <label htmlFor="sessionProfile">profile ID</label>
         <input
           id="sessionProfile"
           value={sessionProfileId}
           onChange={(event) => onSessionProfileChange(event.target.value)}
         />
-        <label htmlFor="sessionRole">session role</label>
+        <label htmlFor="sessionRole">role</label>
         <input id="sessionRole" value={sessionRole} onChange={(event) => onSessionRoleChange(event.target.value)} />
         <button type="submit">Create Session</button>
       </form>
 
       <form className="session-form attach-form" onSubmit={onAttachSession}>
-        <label htmlFor="applicationInput">attach application_id</label>
+        <label htmlFor="applicationInput">attach application ID</label>
         <input
           id="applicationInput"
           value={applicationIdInput}
@@ -91,7 +92,7 @@ export function SessionControlPanel({
           Load History
         </button>
         <button type="button" onClick={onBroadcastPing} disabled={connectedParticipantCount === 0}>
-          Ping All
+          Ping all sockets
         </button>
       </div>
     </article>

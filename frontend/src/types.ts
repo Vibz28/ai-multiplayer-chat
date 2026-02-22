@@ -96,3 +96,15 @@ export type ChatMessage = {
   traceId?: string
   complete?: boolean
 }
+
+export type ConversationSummary = {
+  applicationId: string
+  title: string
+  summary: string
+  lastUpdated: string
+  threadId: string | null
+  workflowId: string | null
+  traceId: string | null
+  activeProfileId: string | null
+  isIncognito: boolean
+}

@@ -152,6 +152,7 @@ async def test_agent_stream_emits_reasoning_content_and_complete() -> None:
 
     assert events[0]["type"] == "status"
     assert events[0]["stream_state"] == "queued"
+    assert events[1]["type"] == "checklist"
     assert [event["type"] for event in events][-1] == "complete"
     assert "run_id" in events[0]["payload"]["run"]
     assert events[0]["payload"]["run"]["status"] == "running"
@@ -187,8 +188,8 @@ async def test_agent_stream_emits_error_event_on_failure() -> None:
     finally:
         state.agent_graph = original_graph
 
-    assert [event["type"] for event in events] == ["status", "error"]
-    assert events[1]["stream_state"] == "error"
-    assert "Agent stream failed" in events[1]["payload"]["message"]
-    assert events[1]["payload"]["run"]["status"] == "error"
-    assert events[1]["payload"]["run"]["error"] is not None
+    assert [event["type"] for event in events] == ["status", "checklist", "error"]
+    assert events[2]["stream_state"] == "error"
+    assert "Agent stream failed" in events[2]["payload"]["message"]
+    assert events[2]["payload"]["run"]["status"] == "error"
+    assert events[2]["payload"]["run"]["error"] is not None

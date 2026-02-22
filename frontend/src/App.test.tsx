@@ -7,6 +7,6 @@ describe('App', () => {
     render(<App />)
     expect(screen.getByRole('heading', { name: 'Collaborative AI Chat' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Toggle light and dark theme' })).toBeInTheDocument()
-    expect(screen.getByRole('heading', { name: 'Conversation' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'Thread Feed' })).toBeInTheDocument()
   })
 })
