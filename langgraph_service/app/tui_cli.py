@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import curses
 import json
+import shutil
+import subprocess
 import textwrap
 import time
 from datetime import UTC, datetime
@@ -87,6 +89,13 @@ def move_cursor_word_right(text: str, cursor: int) -> int:
     return idx
 
 
+def move_cursor_line_left(text: str, cursor: int) -> int:
+    idx = max(0, min(cursor, len(text)))
+    while idx > 0 and text[idx - 1] != "\n":
+        idx -= 1
+    return idx
+
+
 def decode_alt_sequence(sequence: list[int]) -> str | None:
     if not sequence:
         return None
@@ -94,11 +103,15 @@ def decode_alt_sequence(sequence: list[int]) -> str | None:
         return "word_left"
     if sequence == [ord("f")]:
         return "word_right"
+    if sequence in ([127], [8]):
+        return "delete_word_left"
     last = sequence[-1]
     if last == ord("b"):
         return "word_left"
     if last == ord("f"):
         return "word_right"
+    if last in (8, 127):
+        return "delete_word_left"
     if last in (ord("D"), 68) and 51 in sequence:
         return "word_left"
     if last in (ord("C"), 67) and 51 in sequence:
@@ -248,6 +261,9 @@ class LangGraphTui:
         self._colors_enabled = False
         self._color_pairs: dict[str, int] = {}
         self._pending_meta = False
+        self._selection_mode = False
+        self._selection_mode_dirty = True
+        self._mouse_capture_enabled = False
 
         # Prevent a large burst of events from being consumed in one frame.
         self._max_events_per_tick = 32
@@ -348,15 +364,16 @@ class LangGraphTui:
         screen.nodelay(True)
         screen.keypad(True)
         self._init_colors()
-        curses.mouseinterval(0)
-        try:
-            curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
-        except curses.error:
-            pass
+        self._set_mouse_capture(enabled=True)
 
         while self._running:
-            self._drain_event_queue()
-            self._render(screen)
+            if self._selection_mode:
+                if self._selection_mode_dirty:
+                    self._render(screen)
+                    self._selection_mode_dirty = False
+            else:
+                self._drain_event_queue()
+                self._render(screen)
             self._read_key(screen)
             time.sleep(0.03)
 
@@ -377,6 +394,27 @@ class LangGraphTui:
     def _set_focus_panel(self, panel_id: str) -> None:
         if panel_id in self._panel_order:
             self._panel_focus_index = self._panel_order.index(panel_id)
+
+    def _set_mouse_capture(self, *, enabled: bool) -> None:
+        curses.mouseinterval(0)
+        mask = curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION if enabled else 0
+        try:
+            curses.mousemask(mask)
+            self._mouse_capture_enabled = enabled
+        except curses.error:
+            self._mouse_capture_enabled = False
+
+    def _set_selection_mode(self, enabled: bool) -> None:
+        self._selection_mode = enabled
+        self._selection_mode_dirty = True
+        self._set_mouse_capture(enabled=not enabled)
+        if enabled:
+            self._status_line = (
+                "Selection mode enabled. Use terminal mouse/keyboard to select and copy text. "
+                "Press F2 or Ctrl+T to return."
+            )
+        else:
+            self._status_line = "Selection mode disabled."
 
     def _panel_from_coords(self, y: int, x: int) -> str | None:
         for panel_id, (py, px, pheight, pwidth) in self._panel_regions.items():
@@ -461,6 +499,105 @@ class LangGraphTui:
         suffix = self._input_buffer[self._input_cursor + 1 :]
         self._input_buffer = f"{prefix}{suffix}"
 
+    def _delete_range(self, start: int, end: int) -> None:
+        start_idx = max(0, min(start, len(self._input_buffer)))
+        end_idx = max(start_idx, min(end, len(self._input_buffer)))
+        self._input_buffer = f"{self._input_buffer[:start_idx]}{self._input_buffer[end_idx:]}"
+        self._input_cursor = start_idx
+
+    def _delete_word_before_cursor(self) -> None:
+        if self._input_cursor <= 0:
+            return
+        start = move_cursor_word_left(self._input_buffer, self._input_cursor)
+        self._delete_range(start, self._input_cursor)
+
+    def _delete_line_before_cursor(self) -> None:
+        if self._input_cursor <= 0:
+            return
+        start = move_cursor_line_left(self._input_buffer, self._input_cursor)
+        self._delete_range(start, self._input_cursor)
+
+    def _panel_title(self, panel_id: str) -> str:
+        return {
+            self.PANEL_TRANSCRIPT: "Transcript",
+            self.PANEL_REASONING: "Reasoning Stream",
+            self.PANEL_OUTPUT: "Output Stream",
+            self.PANEL_DIAGNOSTICS: "LangSmith-Style Diagnostics",
+            self.PANEL_EVENTS: "Event Log",
+            self.PANEL_INPUT: "Chat Input",
+        }.get(panel_id, panel_id)
+
+    def _panel_content_lines(self, panel_id: str) -> list[str]:
+        if panel_id == self.PANEL_TRANSCRIPT:
+            return self._transcript_lines or ["(empty)"]
+        if panel_id == self.PANEL_REASONING:
+            return self._reasoning_panel_lines()
+        if panel_id == self.PANEL_OUTPUT:
+            return self._output_panel_lines()
+        if panel_id == self.PANEL_DIAGNOSTICS:
+            return self._diagnostic_lines or ["(empty)"]
+        if panel_id == self.PANEL_EVENTS:
+            return self._event_lines or ["(empty)"]
+        if panel_id == self.PANEL_INPUT:
+            return self._input_buffer.split("\n") or [""]
+        return ["(unknown panel)"]
+
+    def _build_export_text(self, scope: str) -> str:
+        timestamp = datetime.now(UTC).isoformat()
+        if scope == "focused":
+            panel = self._focused_panel()
+            title = self._panel_title(panel)
+            body = "\n".join(self._panel_content_lines(panel))
+            return f"[{timestamp}] {title}\n{body}\n"
+
+        blocks: list[str] = []
+        for panel in [
+            self.PANEL_TRANSCRIPT,
+            self.PANEL_REASONING,
+            self.PANEL_OUTPUT,
+            self.PANEL_DIAGNOSTICS,
+            self.PANEL_EVENTS,
+            self.PANEL_INPUT,
+        ]:
+            title = self._panel_title(panel)
+            body = "\n".join(self._panel_content_lines(panel))
+            blocks.append(f"## {title}\n{body}")
+        return f"[{timestamp}] tui_snapshot\n\n" + "\n\n".join(blocks) + "\n"
+
+    @staticmethod
+    def _copy_text_to_clipboard(text: str) -> bool:
+        commands = [
+            ("pbcopy", []),
+            ("wl-copy", []),
+            ("xclip", ["-selection", "clipboard"]),
+            ("xsel", ["--clipboard", "--input"]),
+        ]
+        for executable, args in commands:
+            if shutil.which(executable) is None:
+                continue
+            try:
+                subprocess.run(
+                    [executable, *args],
+                    input=text.encode("utf-8"),
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _copy_scope(self, scope: str) -> None:
+        text = self._build_export_text(scope)
+        copied = self._copy_text_to_clipboard(text)
+        if copied:
+            self._status_line = f"Copied {scope} panel content to clipboard."
+            return
+        fallback_path = self.log_file.parent / "tui_snapshot.txt"
+        fallback_path.write_text(text, encoding="utf-8")
+        self._status_line = f"Clipboard unavailable. Saved {scope} content to {fallback_path}."
+
     def _read_key(self, screen) -> None:
         key = screen.getch()
         if key == -1:
@@ -468,11 +605,17 @@ class LangGraphTui:
 
         focused = self._focused_panel()
 
+        if key in (curses.KEY_F2, 20):  # F2 / Ctrl+T toggles text-selection mode.
+            self._set_selection_mode(not self._selection_mode)
+            return
+
         if self._pending_meta:
             self._pending_meta = False
-            if focused == self.PANEL_INPUT and key in (ord("b"), ord("f")):
+            if focused == self.PANEL_INPUT and key in (ord("b"), ord("f"), 8, 127):
                 if key == ord("b"):
                     self._input_cursor = move_cursor_word_left(self._input_buffer, self._input_cursor)
+                elif key in (8, 127):
+                    self._delete_word_before_cursor()
                 else:
                     self._input_cursor = move_cursor_word_right(self._input_buffer, self._input_cursor)
                 return
@@ -485,9 +628,15 @@ class LangGraphTui:
                 if focused == self.PANEL_INPUT and action == "word_right":
                     self._input_cursor = move_cursor_word_right(self._input_buffer, self._input_cursor)
                     return
+                if focused == self.PANEL_INPUT and action == "delete_word_left":
+                    self._delete_word_before_cursor()
+                    return
 
         if key in (3,):  # Ctrl+C
             self._running = False
+            return
+
+        if self._selection_mode:
             return
 
         if key in (ord("i"), ord("I")) and focused != self.PANEL_INPUT:
@@ -609,6 +758,8 @@ class LangGraphTui:
                 self._input_cursor = move_cursor_word_left(self._input_buffer, self._input_cursor)
             elif focused == self.PANEL_INPUT and action == "word_right":
                 self._input_cursor = move_cursor_word_right(self._input_buffer, self._input_cursor)
+            elif focused == self.PANEL_INPUT and action == "delete_word_left":
+                self._delete_word_before_cursor()
             return
 
         if key in (10, 13):  # Enter
@@ -635,10 +786,32 @@ class LangGraphTui:
                 for panel in self._panel_order:
                     self._scroll_offsets[panel] = 0
                 return
+            if value in {"/select", "/select on"}:
+                self._set_selection_mode(True)
+                return
+            if value == "/select off":
+                self._set_selection_mode(False)
+                return
+            if value in {"/copy", "/copy focused"}:
+                self._copy_scope("focused")
+                return
+            if value in {"/copyall", "/copy all"}:
+                self._copy_scope("all")
+                return
             if self._streaming:
                 self._status_line = "A run is already in progress. Wait for completion."
                 return
             self._start_stream(value)
+            return
+
+        if key in (23,):  # Ctrl+W (often sent by Ctrl+Backspace in terminal profiles)
+            if focused == self.PANEL_INPUT:
+                self._delete_word_before_cursor()
+            return
+
+        if key in (21,):  # Ctrl+U clears to start of current line
+            if focused == self.PANEL_INPUT:
+                self._delete_line_before_cursor()
             return
 
         if key in (curses.KEY_BACKSPACE, 8, 127):
@@ -955,7 +1128,7 @@ class LangGraphTui:
             "Navigation: Tab/Shift+Tab focus  |  Up/Down line scroll  |  PgUp/PgDn page scroll  |  Home/End jump"
         )
         help_line_2 = (
-            "Mouse: click panel focus  |  click scrollbar for fine scroll  |  wheel scroll  |  /clear  |  /quit"
+            "Clipboard/Select: /copy /copyall  |  F2 or Ctrl+T select-mode  |  Alt+Backspace word-del  |  Ctrl+U line-del"
         )
         help_attr = self._color_attr("help")
         screen.addnstr(

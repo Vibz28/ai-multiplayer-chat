@@ -16,6 +16,7 @@ tui_spec.loader.exec_module(tui_module)
 format_run_diagnostics = tui_module.format_run_diagnostics
 LangGraphTui = tui_module.LangGraphTui
 decode_alt_sequence = tui_module.decode_alt_sequence
+move_cursor_line_left = tui_module.move_cursor_line_left
 move_cursor_word_left = tui_module.move_cursor_word_left
 move_cursor_word_right = tui_module.move_cursor_word_right
 normalize_display_text = tui_module.normalize_display_text
@@ -104,6 +105,7 @@ def test_normalize_display_text_ascii_sanitization() -> None:
 def test_decode_alt_sequence_for_word_navigation() -> None:
     assert decode_alt_sequence([ord("b")]) == "word_left"
     assert decode_alt_sequence([ord("f")]) == "word_right"
+    assert decode_alt_sequence([127]) == "delete_word_left"
     assert decode_alt_sequence([91, 49, 59, 51, 68]) == "word_left"
     assert decode_alt_sequence([91, 49, 59, 51, 67]) == "word_right"
 
@@ -114,6 +116,12 @@ def test_word_cursor_helpers_move_across_tokens() -> None:
     assert move_cursor_word_left(text, 13) == 8
     assert move_cursor_word_right(text, 0) == 5
     assert move_cursor_word_right(text, 5) == 12
+
+
+def test_line_cursor_helper_moves_to_line_start() -> None:
+    text = "alpha beta\ngamma delta"
+    assert move_cursor_line_left(text, len(text)) == len("alpha beta\n")
+    assert move_cursor_line_left(text, len("alpha")) == 0
 
 
 def test_input_wrapped_view_tracks_cursor_position(tmp_path) -> None:
@@ -131,6 +139,40 @@ def test_input_wrapped_view_tracks_cursor_position(tmp_path) -> None:
     assert len(visible) == 3
     assert 0 <= cursor_row < 3
     assert 0 <= cursor_col < 10
+
+
+def test_input_delete_word_and_line_helpers(tmp_path) -> None:
+    app = LangGraphTui(
+        base_url="http://localhost:8080",
+        application_id="cli-test",
+        profile_id="cli-user",
+        thread_id="thread-test",
+        log_file=tmp_path / "events.jsonl",
+    )
+    app._input_buffer = "alpha beta\ngamma delta"
+    app._input_cursor = len(app._input_buffer)
+
+    app._delete_word_before_cursor()
+    assert app._input_buffer == "alpha beta\ngamma "
+    assert app._input_cursor == len("alpha beta\ngamma ")
+
+    app._delete_line_before_cursor()
+    assert app._input_buffer == "alpha beta\n"
+    assert app._input_cursor == len("alpha beta\n")
+
+
+def test_export_text_contains_panel_content(tmp_path) -> None:
+    app = LangGraphTui(
+        base_url="http://localhost:8080",
+        application_id="cli-test",
+        profile_id="cli-user",
+        thread_id="thread-test",
+        log_file=tmp_path / "events.jsonl",
+    )
+    app._append_transcript("user", "hello")
+    snapshot = app._build_export_text("all")
+    assert "## Transcript" in snapshot
+    assert "hello" in snapshot
 
 
 def test_tui_preserves_stream_output_after_completion(tmp_path) -> None:
