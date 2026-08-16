@@ -46,6 +46,10 @@ This document is the frontend-facing contract for the backend session APIs and W
   - Lists immutable deliverables registered for the room.
   - `items[]` includes `artifact_id`, `filename`, `title`, `kind`, `media_type`, `size_bytes`, and `sha256`.
 
+- `GET /v1/sessions/{application_id}/model-routes` with `Authorization: Bearer {room_token}`
+  - Returns per-harness availability plus the provider, model, and routing mode selected by the platform model router.
+  - The frontend disables native harnesses that do not have a compatible platform subscription grant.
+
 - `GET /v1/sessions/{application_id}/artifacts/{artifact_id}/content` with `Authorization: Bearer {room_token}`
   - Downloads one immutable artifact after room-capability validation.
 

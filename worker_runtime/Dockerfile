@@ -22,7 +22,7 @@ WORKDIR /runtime
 COPY worker_runtime/__init__.py worker_runtime/runtime.py /runtime/worker_runtime/
 
 RUN useradd --create-home --uid 10001 worker \
-    && mkdir -p /workspace/jobs /artifacts /auth/codex /auth/claude /auth/opencode /auth/pi \
+    && mkdir -p /workspace/jobs /artifacts /auth/platform \
     && chown -R worker:worker /workspace /artifacts /auth /runtime
 
 USER worker

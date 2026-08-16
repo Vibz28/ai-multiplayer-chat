@@ -97,7 +97,7 @@ Recommended production architecture:
   - backend container
   - langgraph-service container
   - credential-free worker-runtime container
-  - four provider runtime containers using the same image, each with one adapter allowlist and one auth volume
+  - one internal model-router service, one platform provider-account volume, and four harness runtime containers using the same adapter image
 - Managed stores:
   - DynamoDB for application/session metadata and workflow mapping
   - RDS Postgres for thread/run history

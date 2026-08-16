@@ -48,7 +48,7 @@ The LangGraph service uses a hybrid model:
   - `workspace_exec` (argv-only bounded command execution in the credential-free runtime)
   - `fetch_web` (bounded public HTTP/HTTPS fetch with private-address rejection)
   - `register_artifact` (immutable review copy and metadata)
-- External harness dispatch includes pinned Claude Code, Codex, OpenCode, and Pi adapters, each in a separate provider-specific credential runtime.
+- External harness dispatch includes pinned Claude Code, Codex, OpenCode, and Pi adapters; provider identity and model selection are resolved by the platform model router.
 - Persistent thread registration via Postgres
 - Runtime heartbeat/session side-channel via Redis
 
@@ -123,10 +123,10 @@ LangGraph CLI graph config:
 
 - `LANGGRAPH_POSTGRES_DSN`
 - `LANGGRAPH_REDIS_URL`
-- `LANGGRAPH_OLLAMA_PRIMARY_BASE_URL`
 - `LANGGRAPH_OLLAMA_PRIMARY_MODEL`
-- `LANGGRAPH_OLLAMA_FALLBACK_CLOUD_BASE_URL`
 - `LANGGRAPH_OLLAMA_FALLBACK_CLOUD_MODEL`
+- `LANGGRAPH_MODEL_ROUTER_URL`
+- `LANGGRAPH_MODEL_ROUTER_TOKEN`
 - `LANGGRAPH_SERVICE_TOKEN`
 - `LANGGRAPH_RUNTIME_TOKEN`
 - `LANGGRAPH_AGENT_PROMPT_MANIFEST_PATH`
@@ -198,7 +198,7 @@ TUI behavior:
 - `langgraph-service` container
 - `postgres` (thread persistence)
 - `redis` (runtime operational channel)
-- LangSmith env forwarding and Ollama endpoint wiring
+- LangSmith env forwarding and authenticated model-router wiring
 
 Start full stack:
 

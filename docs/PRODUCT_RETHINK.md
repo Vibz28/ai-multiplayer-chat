@@ -51,6 +51,6 @@ Fieldwork now treats the worker as the product and WebSockets as invisible plumb
 
 ## Product Limits
 
-This pull request proves the room, capability, streaming, persistence, phone bridge, downloadable deliverables, visual product direction, and real harness dispatch. Moss Cloud uses cloud models only. Selecting Claude Code, Codex, OpenCode, or Pi invokes that pinned binary in its provider-specific credential runtime; diagnostics record both the requested and executed harness.
+This pull request proves the room, capability, streaming, persistence, phone bridge, downloadable deliverables, visual product direction, and real harness dispatch. Moss Cloud uses cloud models only. A platform model router owns provider accounts and LLM routing; selecting Claude Code, Codex, OpenCode, or Pi invokes that pinned binary with either a compatible provider grant or a delegated cloud-route token. Diagnostics record both the requested harness and resolved provider/model route.
 
 The Compose demo still uses persistent room workspaces and long-lived runtime services rather than one disposable container per assignment. It has no repository checkout/publisher, browser automation, deployment authority, or privileged approval executor. Those remain production supervisor responsibilities described in `DIGITAL_WORKER_ARCHITECTURE.md`.

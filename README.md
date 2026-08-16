@@ -8,11 +8,11 @@ The repository demonstrates the control-plane bones of a larger system:
 - WebSocket presence, reconnection, queued work, and streamed responses
 - canonical thread history and work checklists
 - credential-free workspace tools in a private worker container
-- one credential-isolated runtime per real Codex, Claude Code, OpenCode, and Pi adapter
+- a platform model router plus real Codex, Claude Code, OpenCode, and Pi execution adapters
 - an optional Telegram bridge for text and cloud-transcribed iPhone voice notes
 - downloadable, immutable room deliverables
 
-Moss Cloud runs LangGraph through Ollama's cloud service using `kimi-k2.7-code:cloud` with `gpt-oss:120b-cloud` as its cloud fallback. There is no local model fallback, and the stack never loads local Ollama model weights. Its tool suite can search, read, hash-safely edit, run bounded argv-only commands, fetch public web pages, maintain a checklist, and register immutable artifacts. The CLI adapters execute the selected signed-in harness against the same room workspace.
+All LLM operations pass through Fieldwork's authenticated model-router plane. Moss Cloud uses `kimi-k2.7-code:cloud` with `gpt-oss:120b-cloud` as its cloud fallback; OpenCode and Pi can use the same OpenAI-compatible cloud route with short-lived run tokens. The router also resolves compatible ChatGPT and Claude subscription grants for native harness integrations. There is no local model fallback, and the stack never loads local model weights. Moss can search, read, hash-safely edit, run bounded argv-only commands, fetch public web pages, maintain a checklist, and register immutable artifacts.
 
 ## Try It
 
@@ -23,7 +23,7 @@ scripts/stack up
 scripts/stack smoke
 ```
 
-The stack script creates ignored, mode-600 random values for the room, LangGraph, and runtime service secrets in `.env` when they are absent. Direct `docker compose` use must set `FIELDWORK_ROOM_TOKEN_SECRET`, `FIELDWORK_LANGGRAPH_TOKEN`, and `FIELDWORK_RUNTIME_TOKEN` explicitly.
+The stack script creates ignored, mode-600 random values for the room, LangGraph, model-router, and runtime service secrets in `.env` when they are absent. Direct `docker compose` use must set `FIELDWORK_ROOM_TOKEN_SECRET`, `FIELDWORK_LANGGRAPH_TOKEN`, `FIELDWORK_MODEL_ROUTER_TOKEN`, and `FIELDWORK_RUNTIME_TOKEN` explicitly.
 
 Open `http://localhost:5173`, choose **Meet Moss**, and copy the room invite into another browser. Both clients join the same room and receive the same worker stream. The room ID is not sufficient by itself; the invite also contains a signed capability key. For a physical phone, build with phone-reachable `VITE_BACKEND_HTTP_URL`/`VITE_BACKEND_WS_URL`, add the public frontend origin to `BACKEND_CORS_ALLOWED_ORIGINS`, and terminate public traffic with TLS.
 
@@ -35,18 +35,20 @@ STACK_LOG_FOLLOW=0 scripts/stack logs backend
 scripts/stack down
 ```
 
-## Harness Sign-In
+## Platform Provider Accounts
 
-Moss Cloud works without harness credentials. To use a CLI adapter, sign in once inside its dedicated persistent auth volume:
+Authentication belongs to the platform provider account, not to the harness selector. Register only the integration grants a provider permits, then inspect the router's compatibility view:
 
 ```bash
-scripts/stack auth codex
-scripts/stack auth claude
-scripts/stack auth opencode
-scripts/stack auth pi
+scripts/stack auth chatgpt codex
+scripts/stack auth chatgpt opencode
+scripts/stack auth chatgpt pi
+scripts/stack auth claude claude-code
+scripts/stack auth claude pi
+scripts/stack auth status
 ```
 
-Codex uses OpenAI's first-party ChatGPT subscription login. Claude Code uses Anthropic's first-party subscription login; on macOS, container login or `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` is required because host Keychain credentials cannot be mounted. OpenCode and Pi are third-party clients; review provider terms before connecting a subscription. Never expose a personal subscription-backed runner as a public or multi-tenant service.
+The provider account store is one persistent platform volume organized by provider and integration grant. OAuth clients still require their own authorization grant; the router does not copy consumer tokens into incompatible formats or pretend subscription OAuth is a generic API key. ChatGPT Plus/Pro is supported by Codex, OpenCode, and Pi. Claude Pro/Max is supported by Claude Code and Pi; Pi documents that third-party Claude usage can draw billed extra usage, while OpenCode explicitly no longer ships Claude subscription support. Without a compatible subscription grant, OpenCode and Pi use the shared cloud route. Never expose a personal subscription-backed runner as a public or multi-tenant service.
 
 Pinned adapters: Codex `0.147.0`, Claude Code `2.1.233`, OpenCode `1.18.18`, and Pi `0.84.2`.
 
@@ -74,9 +76,10 @@ Send `/start` to receive the shared workroom link. Send text or an iPhone voice 
 |---|---|
 | `frontend` | Phone-first React workroom and persistent WebSocket client |
 | `backend` | Capability validation, room presence, queueing, and event normalization |
+| `model-router` | Provider account resolution, cloud allowlist, delegated run tokens, and OpenAI/Ollama-compatible proxying |
 | `langgraph-service` | Cloud-model orchestration, normalized streams, history, and checklist state |
 | `worker-runtime` | Credential-free search/read/edit/exec/web/artifact tools |
-| `codex-runtime`, `claude-runtime`, `opencode-runtime`, `pi-runtime` | One pinned CLI adapter and one dedicated auth volume per provider |
+| `codex-runtime`, `claude-runtime`, `opencode-runtime`, `pi-runtime` | Isolated pinned CLI execution adapters; model/provider identity is resolved by `model-router` |
 | `telegram-gateway` | Optional allowlisted text/voice bridge using outbound polling |
 | `postgres` | Canonical thread and run history |
 | `redis` | Runtime history cache and heartbeat state |
@@ -84,7 +87,7 @@ Send `/start` to receive the shared workroom link. Send text or an iPhone voice 
 
 ## Security Posture
 
-The local Compose stack binds every published port to `127.0.0.1`, keeps LangGraph internal-only, applies `no-new-privileges`, and gives runtime supervisors read-only root filesystems. A runtime supervisor retains only `CHOWN`, `DAC_OVERRIDE`, `SETUID`, and `SETGID` so it can assign each room a distinct mode-700 workspace UID and demote every model-run process before launch. General commands have no auth volume. Each CLI runtime mounts only its own provider auth volume, copies only the required credential files into a room-UID run directory, and syncs token refresh after exit. Artifacts use the same room UID with mode-700 directories. No runtime receives the Docker socket, host home, SSH keys, or repository administration credentials. Random internal service tokens protect runtime and LangGraph APIs; room REST calls use bearer authorization and WebSockets use a subprotocol so capabilities do not appear in request URLs.
+The local Compose stack binds every published port to `127.0.0.1`; LangGraph and the model router remain internal-only. The router holds the cloud allowlist and issues short-lived tokens to gateway-backed harness runs. Provider OAuth grants live in one root-owned platform account volume; a runtime supervisor copies only the selected compatible grant into a mode-700 run directory. Runtime supervisors use read-only root filesystems and retain only `CHOWN`, `DAC_OVERRIDE`, `SETUID`, and `SETGID` so each model process runs under a room-specific UID. Immutable artifacts are root-owned broker storage. No runtime receives the Docker socket, host home, SSH keys, or repository administration credentials. Room REST calls use bearer authorization and WebSockets use a subprotocol so capabilities do not appear in request URLs.
 
 This is still a single-user/private demo, not an internet-ready deployment. Workspaces are separated by room but share long-lived runtime containers, and a selected coding harness can read its own credential cache while it runs. Before remote use, provide TLS, rotate `BACKEND_ROOM_TOKEN_SECRET`, put the control plane behind identity, use a managed queue, launch one disposable container per assignment, enforce egress and resource limits, and use short-lived task credentials. Do not use an outbound tunnel to bypass corporate access controls.
 

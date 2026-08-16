@@ -188,3 +188,29 @@ def test_harness_commands_are_direct_argv(harness: str, tmp_path: Path) -> None:
 )
 def test_extracts_native_harness_result(harness: str, output: str, expected: str) -> None:
     assert runtime._extract_result(harness, output) == expected
+
+
+@pytest.mark.parametrize("harness", ["opencode", "pi"])
+def test_gateway_harnesses_receive_router_config(harness: str, tmp_path: Path) -> None:
+    auth_home = tmp_path / harness
+    auth_home.mkdir()
+    runtime._configure_gateway_auth(
+        harness,
+        auth_home,
+        model="gpt-oss:120b-cloud",
+        token="delegated-token",
+    )
+    route = {
+        "mode": "gateway",
+        "provider": "ollama_cloud",
+        "model": "gpt-oss:120b-cloud",
+    }
+    argv, _, _ = runtime._harness_command(harness, tmp_path, "test", auth_home, route)
+
+    assert any("gpt-oss:120b-cloud" in argument for argument in argv)
+    if harness == "opencode":
+        config = auth_home / ".config/opencode/opencode.json"
+        assert "delegated-token" in config.read_text(encoding="utf-8")
+    else:
+        config = auth_home / "models.json"
+        assert "http://model-router:8181/v1" in config.read_text(encoding="utf-8")

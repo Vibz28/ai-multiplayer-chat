@@ -40,6 +40,37 @@ services:
     ports:
       - "127.0.0.1:${DYNAMODB_PORT:-18001}:8000"
 
+  model-router:
+    image: ${MODEL_ROUTER_IMAGE:-ai-multiplayer-chat/model-router:local}
+    build:
+      context: .
+      dockerfile: model_router/Dockerfile
+    environment:
+      MODEL_ROUTER_TOKEN: ${FIELDWORK_MODEL_ROUTER_TOKEN:?set FIELDWORK_MODEL_ROUTER_TOKEN to a random secret}
+      MODEL_ROUTER_OLLAMA_CLOUD_URL: ${MODEL_ROUTER_OLLAMA_CLOUD_URL:-http://host.docker.internal:11434}
+      MODEL_ROUTER_PRIMARY_MODEL: ${MODEL_ROUTER_PRIMARY_MODEL:-kimi-k2.7-code:cloud}
+      MODEL_ROUTER_FALLBACK_MODEL: ${MODEL_ROUTER_FALLBACK_MODEL:-gpt-oss:120b-cloud}
+      MODEL_ROUTER_CHATGPT_MODEL: ${MODEL_ROUTER_CHATGPT_MODEL:-gpt-5.3-codex}
+      MODEL_ROUTER_CLAUDE_MODEL: ${MODEL_ROUTER_CLAUDE_MODEL:-claude-sonnet-4-6}
+      MODEL_ROUTER_AUTH_ROOT: /auth/platform
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - platform_auth:/auth/platform:ro
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8181/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
   worker-runtime:
     image: ${WORKER_RUNTIME_IMAGE:-ai-multiplayer-chat/worker-runtime:local}
     build:
@@ -48,6 +79,8 @@ services:
     environment:
       WORKER_RUNTIME_TOKEN: ${FIELDWORK_RUNTIME_TOKEN:?set FIELDWORK_RUNTIME_TOKEN to a random secret}
       WORKER_ALLOWED_HARNESS: none
+      WORKER_MODEL_ROUTER_URL: http://model-router:8181
+      WORKER_MODEL_ROUTER_TOKEN: ${FIELDWORK_MODEL_ROUTER_TOKEN:?set FIELDWORK_MODEL_ROUTER_TOKEN to a random secret}
     volumes:
       - worker_workspace:/workspace
       - worker_artifacts:/artifacts
@@ -76,10 +109,12 @@ services:
     environment:
       WORKER_RUNTIME_TOKEN: ${FIELDWORK_RUNTIME_TOKEN:?set FIELDWORK_RUNTIME_TOKEN to a random secret}
       WORKER_ALLOWED_HARNESS: codex
+      WORKER_MODEL_ROUTER_URL: http://model-router:8181
+      WORKER_MODEL_ROUTER_TOKEN: ${FIELDWORK_MODEL_ROUTER_TOKEN:?set FIELDWORK_MODEL_ROUTER_TOKEN to a random secret}
     volumes:
       - worker_workspace:/workspace
       - worker_artifacts:/artifacts
-      - codex_auth:/auth/codex
+      - platform_auth:/auth/platform
     user: "0:0"
     read_only: true
     tmpfs:
@@ -104,11 +139,13 @@ services:
     environment:
       WORKER_RUNTIME_TOKEN: ${FIELDWORK_RUNTIME_TOKEN:?set FIELDWORK_RUNTIME_TOKEN to a random secret}
       WORKER_ALLOWED_HARNESS: claude_code
+      WORKER_MODEL_ROUTER_URL: http://model-router:8181
+      WORKER_MODEL_ROUTER_TOKEN: ${FIELDWORK_MODEL_ROUTER_TOKEN:?set FIELDWORK_MODEL_ROUTER_TOKEN to a random secret}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
     volumes:
       - worker_workspace:/workspace
       - worker_artifacts:/artifacts
-      - claude_auth:/auth/claude
+      - platform_auth:/auth/platform
     user: "0:0"
     read_only: true
     tmpfs:
@@ -133,10 +170,12 @@ services:
     environment:
       WORKER_RUNTIME_TOKEN: ${FIELDWORK_RUNTIME_TOKEN:?set FIELDWORK_RUNTIME_TOKEN to a random secret}
       WORKER_ALLOWED_HARNESS: opencode
+      WORKER_MODEL_ROUTER_URL: http://model-router:8181
+      WORKER_MODEL_ROUTER_TOKEN: ${FIELDWORK_MODEL_ROUTER_TOKEN:?set FIELDWORK_MODEL_ROUTER_TOKEN to a random secret}
     volumes:
       - worker_workspace:/workspace
       - worker_artifacts:/artifacts
-      - opencode_auth:/auth/opencode
+      - platform_auth:/auth/platform
     user: "0:0"
     read_only: true
     tmpfs:
@@ -161,10 +200,12 @@ services:
     environment:
       WORKER_RUNTIME_TOKEN: ${FIELDWORK_RUNTIME_TOKEN:?set FIELDWORK_RUNTIME_TOKEN to a random secret}
       WORKER_ALLOWED_HARNESS: pi
+      WORKER_MODEL_ROUTER_URL: http://model-router:8181
+      WORKER_MODEL_ROUTER_TOKEN: ${FIELDWORK_MODEL_ROUTER_TOKEN:?set FIELDWORK_MODEL_ROUTER_TOKEN to a random secret}
     volumes:
       - worker_workspace:/workspace
       - worker_artifacts:/artifacts
-      - pi_auth:/auth/pi
+      - platform_auth:/auth/platform
     user: "0:0"
     read_only: true
     tmpfs:
@@ -192,10 +233,10 @@ services:
     environment:
       LANGGRAPH_POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/langgraph
       LANGGRAPH_REDIS_URL: redis://redis:6379/0
-      LANGGRAPH_OLLAMA_PRIMARY_BASE_URL: ${LANGGRAPH_OLLAMA_PRIMARY_BASE_URL:-http://host.docker.internal:11434}
       LANGGRAPH_OLLAMA_PRIMARY_MODEL: ${LANGGRAPH_OLLAMA_PRIMARY_MODEL:-kimi-k2.7-code:cloud}
-      LANGGRAPH_OLLAMA_FALLBACK_CLOUD_BASE_URL: ${LANGGRAPH_OLLAMA_FALLBACK_CLOUD_BASE_URL:-http://host.docker.internal:11434}
       LANGGRAPH_OLLAMA_FALLBACK_CLOUD_MODEL: ${LANGGRAPH_OLLAMA_FALLBACK_CLOUD_MODEL:-gpt-oss:120b-cloud}
+      LANGGRAPH_MODEL_ROUTER_URL: http://model-router:8181
+      LANGGRAPH_MODEL_ROUTER_TOKEN: ${FIELDWORK_MODEL_ROUTER_TOKEN:?set FIELDWORK_MODEL_ROUTER_TOKEN to a random secret}
       LANGGRAPH_WORKER_RUNTIME_URL: http://worker-runtime:8090
       LANGGRAPH_CODEX_RUNTIME_URL: http://codex-runtime:8090
       LANGGRAPH_CLAUDE_RUNTIME_URL: http://claude-runtime:8090
@@ -211,12 +252,12 @@ services:
       LANGGRAPH_WORKSPACE_ROOT: /workspace
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
       redis:
+        condition: service_healthy
+      model-router:
         condition: service_healthy
       worker-runtime:
         condition: service_healthy
@@ -247,6 +288,8 @@ services:
       BACKEND_DYNAMODB_ENDPOINT_URL: http://dynamodb-local:8000
       BACKEND_LANGGRAPH_SERVICE_URL: http://langgraph-service:8080
       BACKEND_LANGGRAPH_SERVICE_TOKEN: ${FIELDWORK_LANGGRAPH_TOKEN:?set FIELDWORK_LANGGRAPH_TOKEN to a random secret}
+      BACKEND_MODEL_ROUTER_URL: http://model-router:8181
+      BACKEND_MODEL_ROUTER_TOKEN: ${FIELDWORK_MODEL_ROUTER_TOKEN:?set FIELDWORK_MODEL_ROUTER_TOKEN to a random secret}
       BACKEND_WORKER_RUNTIME_URL: http://worker-runtime:8090
       BACKEND_RUNTIME_TOKEN: ${FIELDWORK_RUNTIME_TOKEN:?set FIELDWORK_RUNTIME_TOKEN to a random secret}
       BACKEND_DYNAMODB_TABLE_NAME: ${BACKEND_DYNAMODB_TABLE_NAME:-application_thread_mapping}
@@ -320,7 +363,4 @@ volumes:
   telegram_data:
   worker_workspace:
   worker_artifacts:
-  codex_auth:
-  claude_auth:
-  opencode_auth:
-  pi_auth:
+  platform_auth:

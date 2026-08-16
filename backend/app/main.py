@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -218,6 +219,32 @@ async def get_session_artifacts(
         items=payload.get("items", []),
         count=int(payload.get("count", 0)),
     )
+
+
+@app.get("/v1/sessions/{application_id}/model-routes")
+async def get_session_model_routes(
+    application_id: str,
+    token: str = Depends(_room_token),
+) -> dict[str, object]:
+    _authorize_room(application_id, token)
+    harnesses = ["langgraph", "codex", "claude_code", "opencode", "pi"]
+
+    async def resolve(harness: str) -> tuple[str, dict[str, object]]:
+        async with httpx.AsyncClient(timeout=5) as client:
+            response = await client.post(
+                f"{settings.model_router_url.rstrip('/')}/v1/routes/resolve",
+                json={"harness": harness, "preferred_provider": "auto"},
+                headers={"X-Fieldwork-Model-Token": settings.model_router_token},
+            )
+            response.raise_for_status()
+        payload = response.json()
+        return harness, payload if isinstance(payload, dict) else {"available": False}
+
+    try:
+        routes = dict(await asyncio.gather(*(resolve(harness) for harness in harnesses)))
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="Unable to resolve platform model routes") from exc
+    return {"application_id": application_id, "routes": routes}
 
 
 @app.get("/v1/sessions/{application_id}/artifacts/{artifact_id}/content")

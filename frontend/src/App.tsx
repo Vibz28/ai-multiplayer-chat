@@ -306,14 +306,27 @@ function App() {
 
             <fieldset className="harness-picker">
               <legend>Preferred agent harness</legend>
-              <p>Moss Cloud uses cloud-hosted models. CLI choices run the selected signed-in harness inside the worker sandbox.</p>
-              {(['Moss Cloud', 'Codex', 'Claude Code', 'OpenCode', 'Pi'] as const).map((option) => (
-                <label key={option} className={room.harness === option ? 'selected' : ''}>
-                  <input type="radio" name="harness" checked={room.harness === option} onChange={() => room.setHarness(option)} />
-                  <span><strong>{option}</strong><small>{option === 'Moss Cloud' ? 'Cloud only, no local model' : option === 'Codex' || option === 'Claude Code' ? 'First-party subscription sign-in' : 'Third-party provider sign-in'}</small></span>
-                  {room.harness === option && <Icon name="check" />}
-                </label>
-              ))}
+              <p>The platform model router resolves cloud models and compatible subscription grants for each sandboxed harness.</p>
+              {(['Moss Cloud', 'Codex', 'Claude Code', 'OpenCode', 'Pi'] as const).map((option) => {
+                const route = room.harnessRoutes[option]
+                const unavailable = route?.available === false
+                const description = unavailable
+                  ? route.reason ?? 'No compatible platform grant is configured.'
+                  : option === 'Moss Cloud'
+                    ? 'Shared cloud route, no local model'
+                    : option === 'Codex'
+                      ? 'Uses the ChatGPT platform account'
+                      : option === 'Claude Code'
+                        ? 'Uses the Claude platform account'
+                        : `Uses ${route?.provider?.replaceAll('_', ' ') ?? 'a compatible platform route'}`
+                return (
+                  <label key={option} className={`${room.harness === option ? 'selected' : ''} ${unavailable ? 'disabled' : ''}`}>
+                    <input type="radio" name="harness" checked={room.harness === option} disabled={unavailable} onChange={() => room.setHarness(option)} />
+                    <span><strong>{option}</strong><small>{description}</small></span>
+                    {room.harness === option && <Icon name="check" />}
+                  </label>
+                )
+              })}
             </fieldset>
 
             <section className="permission-box"><Icon name="shield" /><div><strong>Writer, never administrator</strong><p>The worker runs without host credentials, Docker access, or repository administration permissions.</p></div></section>

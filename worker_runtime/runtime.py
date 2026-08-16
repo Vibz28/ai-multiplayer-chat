@@ -32,12 +32,36 @@ WORKSPACE_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 ARTIFACT_ID = re.compile(r"^artifact_[0-9a-f-]{36}$")
 RUNTIME_TOKEN = os.environ.get("WORKER_RUNTIME_TOKEN", "")
 ALLOWED_HARNESS = os.environ.get("WORKER_ALLOWED_HARNESS", "")
+MODEL_ROUTER_URL = os.environ.get("WORKER_MODEL_ROUTER_URL", "http://model-router:8181").rstrip("/")
+MODEL_ROUTER_TOKEN = os.environ.get("WORKER_MODEL_ROUTER_TOKEN", "")
+PLATFORM_AUTH_ROOT = Path(os.environ.get("WORKER_PLATFORM_AUTH_ROOT", "/auth/platform"))
 PROCESS_ISOLATION_READY = os.geteuid() == 0
-AUTH_FILES = {
-    "codex": [Path("auth.json")],
-    "claude_code": [Path(".credentials.json")],
-    "opencode": [Path(".local/share/opencode/auth.json")],
-    "pi": [Path("auth.json")],
+AUTH_PROFILES = {
+    ("codex", "chatgpt_subscription"): (
+        Path("chatgpt/codex"),
+        "codex",
+        [Path("auth.json")],
+    ),
+    ("opencode", "chatgpt_subscription"): (
+        Path("chatgpt/opencode"),
+        "opencode",
+        [Path(".local/share/opencode/auth.json")],
+    ),
+    ("claude_code", "claude_subscription"): (
+        Path("claude/claude-code"),
+        "claude",
+        [Path(".credentials.json")],
+    ),
+    ("pi", "chatgpt_subscription"): (
+        Path("shared/pi"),
+        "pi",
+        [Path("auth.json")],
+    ),
+    ("pi", "claude_subscription"): (
+        Path("shared/pi"),
+        "pi",
+        [Path("auth.json")],
+    ),
 }
 
 app = FastAPI(title="Fieldwork Worker Runtime")
@@ -225,12 +249,18 @@ async def health() -> JSONResponse:
         name: shutil.which(name) is not None for name in ("claude", "codex", "opencode", "pi", "git", "rg")
     }
     process_isolation = PROCESS_ISOLATION_READY
-    healthy = all(binaries.values()) and process_isolation and bool(RUNTIME_TOKEN)
+    healthy = (
+        all(binaries.values())
+        and process_isolation
+        and bool(RUNTIME_TOKEN)
+        and bool(MODEL_ROUTER_TOKEN)
+    )
     return JSONResponse(status_code=200 if healthy else 503, content={
         "status": "ok" if healthy else "degraded",
         "binaries": binaries,
         "process_isolation": process_isolation,
         "authenticated": bool(RUNTIME_TOKEN),
+        "model_router_configured": bool(MODEL_ROUTER_TOKEN),
     })
 
 
@@ -595,42 +625,153 @@ async def download_artifact(workspace_id: str, artifact_id: str) -> FileResponse
     )
 
 
+async def _resolve_harness_route(harness: str) -> dict[str, Any]:
+    if not MODEL_ROUTER_TOKEN:
+        raise HTTPException(status_code=503, detail="model router token is not configured")
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(
+                f"{MODEL_ROUTER_URL}/v1/routes/resolve",
+                json={"harness": harness, "preferred_provider": "auto"},
+                headers={"X-Fieldwork-Model-Token": MODEL_ROUTER_TOKEN},
+            )
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="model router is unavailable") from exc
+    route = response.json()
+    if not isinstance(route, dict) or not route.get("available"):
+        reason = route.get("reason") if isinstance(route, dict) else None
+        raise HTTPException(status_code=409, detail=str(reason or "no compatible model route is available"))
+    return route
+
+
+async def _delegated_model_token(workspace_id: str, harness: str) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.post(
+                f"{MODEL_ROUTER_URL}/v1/tokens",
+                json={"workspace_id": workspace_id, "harness": harness, "ttl_seconds": 3600},
+                headers={"X-Fieldwork-Model-Token": MODEL_ROUTER_TOKEN},
+            )
+            response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise HTTPException(status_code=502, detail="model router could not issue a run token") from exc
+    token = response.json().get("token")
+    if not isinstance(token, str) or not token:
+        raise HTTPException(status_code=502, detail="model router returned an invalid run token")
+    return token
+
+
+def _configure_gateway_auth(
+    harness: str,
+    auth_home: Path,
+    *,
+    model: str,
+    token: str,
+) -> None:
+    if harness == "opencode":
+        config = {
+            "$schema": "https://opencode.ai/config.json",
+            "model": f"fieldwork/{model}",
+            "small_model": f"fieldwork/{model}",
+            "share": "disabled",
+            "provider": {
+                "fieldwork": {
+                    "npm": "@ai-sdk/openai-compatible",
+                    "name": "Fieldwork Model Router",
+                    "options": {"baseURL": f"{MODEL_ROUTER_URL}/v1", "apiKey": token},
+                    "models": {model: {"name": model}},
+                }
+            },
+        }
+        config_path = auth_home / ".config" / "opencode" / "opencode.json"
+    else:
+        config = {
+            "providers": {
+                "fieldwork": {
+                    "baseUrl": f"{MODEL_ROUTER_URL}/v1",
+                    "api": "openai-completions",
+                    "apiKey": token,
+                    "authHeader": True,
+                    "compat": {
+                        "supportsDeveloperRole": False,
+                        "supportsReasoningEffort": False,
+                    },
+                    "models": [
+                        {
+                            "id": model,
+                            "name": model,
+                            "reasoning": True,
+                            "contextWindow": 131072,
+                            "maxTokens": 32768,
+                        }
+                    ],
+                }
+            }
+        }
+        config_path = auth_home / "models.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(config, ensure_ascii=True), encoding="utf-8")
+    config_path.chmod(0o600)
+
+
 def _harness_command(
     harness: str,
     workspace: Path,
     prompt: str,
     auth_home: Path | None = None,
+    route: dict[str, Any] | None = None,
 ) -> tuple[list[str], str | None, dict[str, str]]:
     base_env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "TMPDIR": "/tmp"}
+    model = str(route.get("model", "")) if route else ""
+    provider = str(route.get("provider", "")) if route else ""
+    mode = str(route.get("mode", "native_subscription")) if route else "native_subscription"
     if harness == "codex":
         home = str(auth_home or Path("/auth/codex"))
         env = {**base_env, "HOME": home, "CODEX_HOME": home}
-        return [
+        argv = [
             "codex", "exec", "-C", str(workspace), "--ephemeral", "--ignore-user-config",
             "--ignore-rules", "--skip-git-repo-check", "--sandbox", "danger-full-access", "-c",
             'approval_policy="never"', "--json", "-",
-        ], prompt, env
+        ]
+        if model:
+            argv[2:2] = ["--model", model]
+        return argv, prompt, env
     if harness == "claude_code":
         home = str(auth_home or Path("/auth/claude"))
         env = {**base_env, "HOME": home, "CLAUDE_CONFIG_DIR": home}
         token = os.environ.get("CLAUDE_CODE_OAUTH_TOKEN")
         if token:
             env["CLAUDE_CODE_OAUTH_TOKEN"] = token
-        return [
+        argv = [
             "claude", "--safe-mode", "-p", prompt, "--allowedTools", "Read,Edit,Write,Bash,Glob,Grep",
             "--output-format", "json",
-        ], None, env
+        ]
+        if model:
+            argv[1:1] = ["--model", model]
+        return argv, None, env
     if harness == "opencode":
         env = {**base_env, "HOME": str(auth_home or Path("/auth/opencode"))}
-        return [
-            "opencode", "run", "--dir", str(workspace), "--format", "json", "--auto", "--pure", prompt
-        ], None, env
+        argv = ["opencode", "run", "--dir", str(workspace), "--format", "json", "--auto", "--pure"]
+        if model:
+            selected_model = f"fieldwork/{model}" if mode == "gateway" else f"openai/{model}"
+            argv.extend(["--model", selected_model])
+        argv.append(prompt)
+        return argv, None, env
     home = str(auth_home or Path("/auth/pi"))
     env = {**base_env, "HOME": home, "PI_CODING_AGENT_DIR": home}
-    return [
+    argv = [
         "pi", "--print", "--mode", "json", "--no-session", "--no-approve", "--no-extensions", "--no-skills",
-        "--no-prompt-templates", "--no-context-files", prompt,
-    ], None, env
+        "--no-prompt-templates", "--no-context-files",
+    ]
+    if mode == "gateway":
+        argv.extend(["--provider", "fieldwork", "--model", model])
+    elif provider == "chatgpt_subscription":
+        argv.extend(["--provider", "openai-codex", "--model", model])
+    elif provider == "claude_subscription":
+        argv.extend(["--provider", "anthropic", "--model", model])
+    argv.append(prompt)
+    return argv, None, env
 
 
 def _extract_result(harness: str, output: str) -> str:
@@ -676,26 +817,47 @@ def _extract_result(harness: str, output: str) -> str:
 async def run_harness(request: HarnessRequest) -> dict[str, Any]:
     if ALLOWED_HARNESS != request.harness:
         raise HTTPException(status_code=403, detail="harness is not enabled in this runtime")
+    if os.geteuid() == 0:
+        PLATFORM_AUTH_ROOT.mkdir(parents=True, exist_ok=True)
+        os.chown(PLATFORM_AUTH_ROOT, 0, 0)
+        PLATFORM_AUTH_ROOT.chmod(0o700)
+    route = await _resolve_harness_route(request.harness)
     workspace, run_uid = _prepare_workspace(request.workspace_id)
     auth_names = {"codex": "codex", "claude_code": "claude", "opencode": "opencode", "pi": "pi"}
-    persistent_auth = Path("/auth") / auth_names[request.harness]
-    if os.geteuid() == 0:
+    profile = AUTH_PROFILES.get((request.harness, str(route.get("provider", ""))))
+    persistent_auth = PLATFORM_AUTH_ROOT / profile[0] if profile else None
+    auth_files = profile[2] if profile else []
+    if persistent_auth is not None and os.geteuid() == 0:
         persistent_auth.mkdir(parents=True, exist_ok=True)
         os.chown(persistent_auth, 0, 0)
         persistent_auth.chmod(0o700)
     run_auth_parent = Path(tempfile.mkdtemp(prefix=f"fieldwork-{request.harness}-"))
     run_auth = run_auth_parent / auth_names[request.harness]
     run_auth.mkdir(parents=True)
-    for relative_path in AUTH_FILES[request.harness]:
-        source = persistent_auth / relative_path
+    for relative_path in auth_files:
+        source = persistent_auth / relative_path  # type: ignore[operator]
         if source.is_file() and not source.is_symlink():
             destination = run_auth / relative_path
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(source, destination)
+    if route.get("mode") == "gateway":
+        delegated_token = await _delegated_model_token(request.workspace_id, request.harness)
+        _configure_gateway_auth(
+            request.harness,
+            run_auth,
+            model=str(route["model"]),
+            token=delegated_token,
+        )
     if run_uid is not None:
         run_auth_parent.chmod(0o700)
         _chown_tree(run_auth_parent, run_uid)
-    argv, stdin, env = _harness_command(request.harness, workspace, request.prompt, run_auth)
+    argv, stdin, env = _harness_command(
+        request.harness,
+        workspace,
+        request.prompt,
+        run_auth,
+        route,
+    )
     try:
         result = await _run_process(
             argv,
@@ -708,13 +870,13 @@ async def run_harness(request: HarnessRequest) -> dict[str, Any]:
             keep_output_tail=True,
         )
     finally:
-        for relative_path in AUTH_FILES[request.harness]:
+        for relative_path in auth_files:
             source = run_auth / relative_path
             if source.is_file() and not source.is_symlink():
-                destination = persistent_auth / relative_path
+                destination = persistent_auth / relative_path  # type: ignore[operator]
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source, destination)
-        if os.geteuid() == 0:
+        if persistent_auth is not None and os.geteuid() == 0:
             _chown_tree(persistent_auth, 0)
             persistent_auth.chmod(0o700)
         shutil.rmtree(run_auth_parent, ignore_errors=True)
@@ -751,6 +913,7 @@ async def run_harness(request: HarnessRequest) -> dict[str, Any]:
     return {
         **result,
         "harness": request.harness,
+        "route": route,
         "answer_markdown": _extract_result(request.harness, stdout),
         "artifacts": artifacts,
         "stdout_truncated": stdout_truncated,

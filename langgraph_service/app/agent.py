@@ -73,16 +73,21 @@ def _extract_user_message(messages: list[Any]) -> str:
 
 def get_compiled_graph() -> Any:
     settings = get_settings()
+    router_client = {"headers": {"Authorization": f"Bearer {settings.model_router_token}"}}
 
     primary_llm = ChatOllama(
         model=settings.ollama_primary_model,
-        base_url=settings.ollama_primary_base_url,
+        base_url=settings.model_router_url,
         temperature=0,
+        client_kwargs=router_client,
+        async_client_kwargs=router_client,
     )
     fallback_cloud_llm = ChatOllama(
         model=settings.ollama_fallback_cloud_model,
-        base_url=settings.ollama_fallback_cloud_base_url,
+        base_url=settings.model_router_url,
         temperature=0,
+        client_kwargs=router_client,
+        async_client_kwargs=router_client,
     )
     llm = primary_llm.with_fallbacks([fallback_cloud_llm])
 

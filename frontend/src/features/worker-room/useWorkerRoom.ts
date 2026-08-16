@@ -8,6 +8,12 @@ const NAME_STORAGE_KEY = 'fieldwork.name.v1'
 const HARNESS_STORAGE_KEY = 'fieldwork.harness.v1'
 
 export type HarnessName = 'Moss Cloud' | 'Codex' | 'Claude Code' | 'OpenCode' | 'Pi'
+export type HarnessRoute = {
+  available: boolean
+  provider?: string
+  model?: string | null
+  reason?: string
+}
 type ConnectionState = 'joining' | 'online' | 'reconnecting' | 'offline'
 
 type WorkerRoom = {
@@ -15,6 +21,7 @@ type WorkerRoom = {
   inviteUrl: string
   profileName: string
   harness: HarnessName
+  harnessRoutes: Partial<Record<HarnessName, HarnessRoute>>
   connectionState: ConnectionState
   streamState: StreamState
   messages: ChatMessage[]
@@ -107,6 +114,7 @@ export function useWorkerRoom(): WorkerRoom {
     const saved = window.localStorage.getItem(HARNESS_STORAGE_KEY)
     return saved === 'Codex' || saved === 'Claude Code' || saved === 'OpenCode' || saved === 'Pi' ? saved : 'Moss Cloud'
   })
+  const [harnessRoutes, setHarnessRoutes] = useState<Partial<Record<HarnessName, HarnessRoute>>>({})
   const [connectionState, setConnectionState] = useState<ConnectionState>(applicationId ? 'joining' : 'offline')
   const [streamState, setStreamState] = useState<StreamState>('idle')
   const [messages, setMessages] = useState<ChatMessage[]>([])
@@ -117,6 +125,7 @@ export function useWorkerRoom(): WorkerRoom {
   const [error, setError] = useState('')
   const [isStarting, setIsStarting] = useState(false)
   const [reconnectAttempt, setReconnectAttempt] = useState(0)
+  const [roomValidated, setRoomValidated] = useState(false)
   const socketRef = useRef<WebSocket | null>(null)
   const assistantDraftRef = useRef<string | null>(null)
   const profileNameRef = useRef(profileName)
@@ -141,14 +150,33 @@ export function useWorkerRoom(): WorkerRoom {
       try {
         const headers = roomHeaders(roomToken)
         const sessionResponse = await fetch(`${backendHttpUrl}/v1/sessions/${applicationId}`, { headers })
-        if (!sessionResponse.ok) throw new Error('This room is no longer available.')
+        if (!active) return
+        if ([401, 403, 404].includes(sessionResponse.status)) {
+          window.localStorage.removeItem(ROOM_STORAGE_KEY)
+          window.history.replaceState({}, '', window.location.pathname)
+          setRoomValidated(false)
+          setConnectionState('offline')
+          setRoomToken('')
+          setApplicationId('')
+          setMessages([])
+          setChecklist([])
+          setArtifacts([])
+          setRoster([])
+          setHarnessRoutes({})
+          assistantDraftRef.current = null
+          setError('That room invite is no longer valid. Start a fresh room to continue.')
+          return
+        }
+        if (!sessionResponse.ok) throw new Error('The worker service is unavailable right now.')
         await fetch(`${backendHttpUrl}/v1/sessions/${applicationId}/thread`, { method: 'POST', headers })
-        const [historyResponse, checklistResponse, artifactsResponse] = await Promise.all([
+        const [historyResponse, checklistResponse, artifactsResponse, routesResponse] = await Promise.all([
           fetch(`${backendHttpUrl}/v1/sessions/${applicationId}/history?limit=300`, { headers }),
           fetch(`${backendHttpUrl}/v1/sessions/${applicationId}/checklist`, { headers }),
           fetch(`${backendHttpUrl}/v1/sessions/${applicationId}/artifacts`, { headers }),
+          fetch(`${backendHttpUrl}/v1/sessions/${applicationId}/model-routes`, { headers }),
         ])
         if (!active) return
+        setRoomValidated(true)
         if (historyResponse.ok) {
           const history = await historyResponse.json() as { entries: HistoryEntry[] }
           const hydrated = history.entries.map(historyMessage).filter((message): message is ChatMessage => message !== null)
@@ -162,6 +190,22 @@ export function useWorkerRoom(): WorkerRoom {
           const payload = await artifactsResponse.json() as { items: Artifact[] }
           setArtifacts(payload.items)
         }
+        if (routesResponse.ok) {
+          const payload = await routesResponse.json() as { routes?: Record<string, HarnessRoute> }
+          const routes = payload.routes ?? {}
+          const mappedRoutes: Partial<Record<HarnessName, HarnessRoute>> = {
+            'Moss Cloud': routes.langgraph,
+            Codex: routes.codex,
+            'Claude Code': routes.claude_code,
+            OpenCode: routes.opencode,
+            Pi: routes.pi,
+          }
+          setHarnessRoutes(mappedRoutes)
+          if (mappedRoutes[harness]?.available === false) {
+            setHarnessState('Moss Cloud')
+            setError(`${harness} needs a compatible platform provider grant. Switched to Moss Cloud.`)
+          }
+        }
       } catch (cause) {
         if (!active) return
         setError(cause instanceof Error ? cause.message : 'Unable to open this room.')
@@ -170,10 +214,10 @@ export function useWorkerRoom(): WorkerRoom {
 
     void hydrate()
     return () => { active = false }
-  }, [applicationId, reconnectAttempt, roomToken])
+  }, [applicationId, harness, reconnectAttempt, roomToken])
 
   useEffect(() => {
-    if (!applicationId || !roomToken) return
+    if (!applicationId || !roomToken || !roomValidated) return
     let active = true
     let reconnectTimer: number | undefined
     setConnectionState(reconnectAttempt > 0 ? 'reconnecting' : 'joining')
@@ -307,7 +351,7 @@ export function useWorkerRoom(): WorkerRoom {
       socket.close()
       if (socketRef.current === socket) socketRef.current = null
     }
-  }, [applicationId, reconnectAttempt, roomToken])
+  }, [applicationId, reconnectAttempt, roomToken, roomValidated])
 
   const setProfileName = (value: string) => {
     profileNameRef.current = value
@@ -340,7 +384,9 @@ export function useWorkerRoom(): WorkerRoom {
       setChecklist([])
       setArtifacts([])
       setRoster([])
+      setHarnessRoutes({})
       assistantDraftRef.current = null
+      setRoomValidated(false)
       setReconnectAttempt(0)
       setRoomToken(payload.room_token)
       setApplicationId(payload.application_id)
@@ -406,6 +452,7 @@ export function useWorkerRoom(): WorkerRoom {
     inviteUrl,
     profileName,
     harness,
+    harnessRoutes,
     connectionState,
     streamState,
     messages,

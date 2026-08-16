@@ -19,7 +19,7 @@ ensure_local_secrets() {
   local name
   umask 077
   touch "$env_file"
-  for name in FIELDWORK_RUNTIME_TOKEN FIELDWORK_LANGGRAPH_TOKEN FIELDWORK_ROOM_TOKEN_SECRET; do
+  for name in FIELDWORK_RUNTIME_TOKEN FIELDWORK_LANGGRAPH_TOKEN FIELDWORK_MODEL_ROUTER_TOKEN FIELDWORK_ROOM_TOKEN_SECRET; do
     if [[ -n "${!name:-}" ]] || grep -Eq "^${name}=.+$" "$env_file"; then
       continue
     fi
@@ -44,7 +44,8 @@ Commands:
   status       Show container status
   logs [svc]   Tail logs (all services or one service)
   smoke        Run health checks against backend/langgraph/frontend
-  auth <name>  Sign in a harness (codex, claude, opencode, or pi)
+  auth <provider> [integration]
+                Register a platform provider grant (chatgpt or claude)
   frontend-dev Run frontend in Bun dev mode against containerized backend
 USAGE
 }
@@ -99,7 +100,7 @@ case "$cmd" in
     ;;
   up-core)
     "$repo_root/scripts/check-repo-hygiene"
-    compose up -d --build --wait --wait-timeout "$wait_timeout" postgres redis dynamodb-local worker-runtime codex-runtime claude-runtime opencode-runtime pi-runtime langgraph-service backend
+    compose up -d --build --wait --wait-timeout "$wait_timeout" postgres redis dynamodb-local model-router worker-runtime codex-runtime claude-runtime opencode-runtime pi-runtime langgraph-service backend
     ;;
   up-telegram)
     "$repo_root/scripts/check-repo-hygiene"
@@ -135,6 +136,7 @@ case "$cmd" in
     ;;
   smoke)
     compose ps
+    compose exec -T model-router python -c "import urllib.request; urllib.request.urlopen('http://localhost:8181/health')" >/dev/null
     compose exec -T worker-runtime curl -fsS http://localhost:8090/health >/dev/null
     compose exec -T codex-runtime curl -fsS http://localhost:8090/health >/dev/null
     compose exec -T claude-runtime curl -fsS http://localhost:8090/health >/dev/null
@@ -148,29 +150,52 @@ case "$cmd" in
     echo "  frontend:  http://localhost:${FRONTEND_PORT}"
     echo "  backend:   http://localhost:${BACKEND_PORT}"
     echo "  langgraph: internal service healthy"
+    echo "  models:    platform router healthy"
     ;;
   auth)
-    harness="${1:-}"
-    case "$harness" in
-      codex)
+    provider="${1:-}"
+    integration="${2:-}"
+    if [[ "$provider" == "status" ]]; then
+      compose up -d model-router
+      compose exec -T model-router python -c "import json,os,httpx; response=httpx.get('http://localhost:8181/v1/providers', headers={'X-Fieldwork-Model-Token': os.environ['MODEL_ROUTER_TOKEN']}, timeout=5); response.raise_for_status(); print(json.dumps(response.json()['providers'], indent=2))"
+      exit 0
+    fi
+    if [[ -z "$integration" ]]; then
+      if [[ ! -t 0 ]]; then
+        echo "Specify the integration explicitly; refusing to wait for an interactive selection without a TTY." >&2
+        exit 2
+      fi
+      case "$provider" in
+        chatgpt) read -r -p "Grant ChatGPT to which integration (codex/opencode/pi)? " integration ;;
+        claude) read -r -p "Grant Claude to which integration (claude-code/pi)? " integration ;;
+      esac
+    fi
+    case "$provider:$integration" in
+      chatgpt:codex)
         compose up -d --build codex-runtime
-        compose exec --env HOME=/auth/codex --env CODEX_HOME=/auth/codex codex-runtime codex login --device-auth
+        compose exec --env HOME=/auth/platform/chatgpt/codex --env CODEX_HOME=/auth/platform/chatgpt/codex codex-runtime codex login --device-auth
         ;;
-      claude|claude_code)
-        compose up -d --build claude-runtime
-        compose exec --env HOME=/auth/claude --env CLAUDE_CONFIG_DIR=/auth/claude claude-runtime claude auth login
-        ;;
-      opencode)
+      chatgpt:opencode)
+        echo "Select OpenAI, then ChatGPT Plus/Pro in OpenCode's provider login."
         compose up -d --build opencode-runtime
-        compose exec --env HOME=/auth/opencode opencode-runtime opencode auth login --provider openai
+        compose exec --env HOME=/auth/platform/chatgpt/opencode opencode-runtime opencode auth login
         ;;
-      pi)
-        echo "Run /login in Pi, then exit when authentication is complete."
+      chatgpt:pi)
+        echo "Run /login, select ChatGPT Plus/Pro (Codex), then exit Pi."
         compose up -d --build pi-runtime
-        compose exec --env HOME=/auth/pi --env PI_CODING_AGENT_DIR=/auth/pi pi-runtime pi --no-extensions --no-skills
+        compose exec --env HOME=/auth/platform/shared/pi --env PI_CODING_AGENT_DIR=/auth/platform/shared/pi pi-runtime pi --no-extensions --no-skills
+        ;;
+      claude:claude-code|claude:claude_code)
+        compose up -d --build claude-runtime
+        compose exec --env HOME=/auth/platform/claude/claude-code --env CLAUDE_CONFIG_DIR=/auth/platform/claude/claude-code claude-runtime claude auth login
+        ;;
+      claude:pi)
+        echo "Run /login, select Claude Pro/Max, then exit Pi. Claude may bill third-party extra usage."
+        compose up -d --build pi-runtime
+        compose exec --env HOME=/auth/platform/shared/pi --env PI_CODING_AGENT_DIR=/auth/platform/shared/pi pi-runtime pi --no-extensions --no-skills
         ;;
       *)
-        echo "auth requires one of: codex, claude, opencode, pi" >&2
+        echo "auth requires: chatgpt [codex|opencode|pi], claude [claude-code|pi], or status" >&2
         exit 1
         ;;
     esac

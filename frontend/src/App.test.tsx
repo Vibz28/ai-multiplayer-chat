@@ -36,4 +36,20 @@ describe('App', () => {
     expect(window.location.hash).toBe('#room=app_worker_room&key=room_secret')
     fetchMock.mockRestore()
   })
+
+  it('clears an invalid persisted room instead of reconnecting forever', async () => {
+    window.localStorage.setItem('fieldwork.room.v1', JSON.stringify({ id: 'app_stale', token: 'stale' }))
+    window.history.replaceState({}, '', '/#room=app_stale&key=stale')
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ detail: 'Invalid room capability' }), { status: 403 }),
+    )
+
+    render(<App />)
+
+    expect(await screen.findByRole('button', { name: /Meet Moss/i })).toBeInTheDocument()
+    expect(screen.getByText(/room invite is no longer valid/i)).toBeInTheDocument()
+    expect(window.localStorage.getItem('fieldwork.room.v1')).toBeNull()
+    expect(window.location.hash).toBe('')
+    fetchMock.mockRestore()
+  })
 })

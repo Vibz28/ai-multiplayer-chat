@@ -50,6 +50,7 @@ async def health() -> HealthResponse:
     redis_ok = await redis_healthy()
     agent_ok = state.agent_graph is not None
     runtime_urls = [
+        settings.model_router_url,
         settings.worker_runtime_url,
         settings.codex_runtime_url,
         settings.claude_runtime_url,

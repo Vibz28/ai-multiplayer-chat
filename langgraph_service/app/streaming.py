@@ -70,7 +70,10 @@ async def invoke_agent(
             result = await run_harness(request)
         except Exception as exc:
             LOGGER.exception("%s harness invocation failed", request.harness)
-            message = "Moss could not start the selected harness. Check its sign-in and try again."
+            message = (
+                "Moss could not start the selected harness. "
+                "Check the platform model route or provider grant and try again."
+            )
             raise HTTPException(
                 status_code=502,
                 detail={
@@ -87,6 +90,7 @@ async def invoke_agent(
                 },
             ) from exc
         answer = str(result.get("answer_markdown", "")).strip()
+        route = result.get("route") if isinstance(result.get("route"), dict) else {}
         run = build_run_diagnostics(
             request=request,
             run_id=run_id,
@@ -94,10 +98,12 @@ async def invoke_agent(
             status="completed",
             started_at=started_at,
             finished_at=datetime.now(UTC),
-            model_selected=request.harness,
+            model_selected=str(route.get("model") or request.harness),
             output_characters=len(answer),
             output_preview=answer,
         )
+        run["model_provider"] = str(route.get("provider") or request.harness)
+        run["model_route_mode"] = str(route.get("mode") or "native")
         run["worker_duration_ms"] = result.get("duration_ms")
         return answer, [], run
 

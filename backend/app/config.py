@@ -15,6 +15,8 @@ class Settings(BaseSettings):
 
     langgraph_service_url: str = "http://langgraph-service:8080"
     langgraph_service_token: str = "local-langgraph-secret-change-me"
+    model_router_url: str = "http://model-router:8181"
+    model_router_token: str = ""
     worker_runtime_url: str = "http://worker-runtime:8090"
     runtime_token: str = "local-runtime-secret-change-me"
     application_id_prefix: str = "app"

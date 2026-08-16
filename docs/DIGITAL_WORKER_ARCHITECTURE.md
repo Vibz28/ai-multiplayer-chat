@@ -2,10 +2,11 @@
 
 ## Product Boundary
 
-Fieldwork has two planes:
+Fieldwork has three planes:
 
 1. The control plane receives assignments, maintains room presence and durable status, and returns business-readable deliverables.
-2. The work plane runs an agent harness inside an isolated workspace with narrowly scoped credentials.
+2. The model operations plane owns provider accounts, model policy, routing, compatibility, delegated run tokens, and LLM API proxying.
+3. The work plane runs an agent harness inside an isolated workspace with a route selected by the model operations plane.
 
 The web app and Telegram are control surfaces. They must never become terminals, expose chain-of-thought, or inherit repository administration authority.
 
@@ -20,8 +21,11 @@ Telegram gateway ┘                              │
                                          LangGraph orchestrator
                                            │              │
                                   credential-free     selected CLI
-                                  worker-runtime    provider runtime
-                                           │       (one per CLI/auth volume)
+                                  worker-runtime    harness runtime
+                                           │              │
+                                           └──── model-router
+                                                  ├─ cloud model route
+                                                  └─ platform provider grants
                                        workspace + artifact volumes
                                            │
                                       Postgres / Redis
@@ -31,9 +35,11 @@ Room capabilities are HMAC values bound to an application ID. Browser invite lin
 
 The backend hub is process-local. The demo therefore runs one backend replica. Production must move presence, generation leases, and fan-out to a shared broker before scaling horizontally.
 
-Moss Cloud uses a strict allowlist of Ollama Cloud model identifiers. The host Ollama process is a cloud client; Fieldwork has no local model name or fallback. General tools run in credential-free `worker-runtime`. Claude Code, Codex, OpenCode, and Pi each run in a separate private service that mounts only its own auth volume. Internal APIs require a token not inherited by child processes.
+The model router enforces a strict allowlist of Ollama Cloud model identifiers and exposes authenticated Ollama- and OpenAI-compatible endpoints. The host Ollama process is only the upstream cloud client; Fieldwork has no local model name or fallback. LangGraph, OpenCode, and Pi can use this shared API plane. The router separately resolves native ChatGPT or Claude subscription grants when a selected harness supports that provider integration.
 
-Runtime supervisors have read-only root filesystems and retain only the Linux capabilities required to chown a room workspace and demote a child process. Every room receives a deterministic unprivileged UID and a mode-700 workspace. Provider auth is copied into a mode-700 per-run directory owned by that UID and synced back by the supervisor after token refresh. Model-run processes therefore cannot traverse sibling workspaces, artifact storage, supervisor environment, or another provider's credentials.
+Provider identity is stored once in a root-owned platform account volume, organized by provider and OAuth integration grant rather than by harness service. OAuth clients may still require separate grants because their token formats and refresh clients are not interchangeable. The router's compatibility registry currently maps ChatGPT to Codex, OpenCode, and Pi, and Claude to Claude Code and Pi. Unsupported combinations are not offered or silently emulated.
+
+Runtime supervisors have read-only root filesystems and retain only the Linux capabilities required to chown a room workspace and demote a child process. Every room receives a deterministic unprivileged UID and a mode-700 workspace. For native subscription routes, only the selected integration grant is copied into a mode-700 per-run directory and synced after refresh. Gateway routes receive a short-lived model-router token instead of provider credentials. Model-run processes therefore cannot traverse sibling workspaces, immutable artifact storage, supervisor environment, or unrelated provider grants.
 
 The demo workspace is room-scoped, not assignment-scoped. The runtime auto-registers files created under `deliverables/` by a CLI harness; Moss Cloud can explicitly register any completed file. Artifact bytes and metadata are immutable copies, and downloads are proxied through room-capability authorization.
 
@@ -96,7 +102,7 @@ The demo implements a synchronous subset of this contract: allowlisted argv cons
 
 ## Hard Permission Boundary
 
-Production assignment containers should run as non-root with `no-new-privileges`, all capabilities dropped, no Docker socket, no host home directory, and a read-only root filesystem. The Compose demo uses a minimal-capability runtime supervisor to create room-specific Unix identities, then runs every model-controlled child as that unprivileged identity. Only workspace, artifact, temporary, and provider-specific auth volumes are writable by their designated owners.
+Production assignment containers should run as non-root with `no-new-privileges`, all capabilities dropped, no Docker socket, no host home directory, and a read-only root filesystem. The Compose demo uses a minimal-capability runtime supervisor to create room-specific Unix identities, then runs every model-controlled child as that unprivileged identity. The platform account store remains supervisor-only; a child receives either one selected grant copy or a short-lived router token.
 
 The worker receives repository content through a supervisor-controlled checkout. It does not receive organization-owner tokens, repository administration scopes, branch-protection bypass, secret-management permissions, or credentials capable of changing repository settings. A separate publisher service may receive a reviewed patch and create a draft PR using a short-lived installation token with repository-content write permission only.
 
