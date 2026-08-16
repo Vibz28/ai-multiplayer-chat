@@ -2,6 +2,13 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+if (cd "$ROOT_DIR" && docker compose ps --status running --services | grep -qx langgraph-service); then
+  cd "$ROOT_DIR"
+  exec docker compose exec langgraph-service \
+    python -m app.tui_cli --log-file /tmp/langgraph-tui-events.jsonl "$@"
+fi
+
 cd "$ROOT_DIR/langgraph_service"
 
 if [[ -x "$ROOT_DIR/.venv/bin/python" ]]; then

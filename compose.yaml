@@ -16,7 +16,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "${POSTGRES_PORT:-15432}:5432"
+      - "127.0.0.1:${POSTGRES_PORT:-15432}:5432"
 
   redis:
     image: redis:8-alpine
@@ -27,7 +27,7 @@ services:
       timeout: 3s
       retries: 20
     ports:
-      - "${REDIS_PORT:-16379}:6379"
+      - "127.0.0.1:${REDIS_PORT:-16379}:6379"
 
   dynamodb-local:
     image: amazon/dynamodb-local:latest
@@ -38,7 +38,151 @@ services:
       timeout: 3s
       retries: 10
     ports:
-      - "${DYNAMODB_PORT:-18001}:8000"
+      - "127.0.0.1:${DYNAMODB_PORT:-18001}:8000"
+
+  worker-runtime:
+    image: ${WORKER_RUNTIME_IMAGE:-ai-multiplayer-chat/worker-runtime:local}
+    build:
+      context: .
+      dockerfile: worker_runtime/Dockerfile
+    environment:
+      WORKER_RUNTIME_TOKEN: ${FIELDWORK_RUNTIME_TOKEN:?set FIELDWORK_RUNTIME_TOKEN to a random secret}
+      WORKER_ALLOWED_HARNESS: none
+    volumes:
+      - worker_workspace:/workspace
+      - worker_artifacts:/artifacts
+    user: "0:0"
+
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8090/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+
+  codex-runtime:
+    image: ${WORKER_RUNTIME_IMAGE:-ai-multiplayer-chat/worker-runtime:local}
+    environment:
+      WORKER_RUNTIME_TOKEN: ${FIELDWORK_RUNTIME_TOKEN:?set FIELDWORK_RUNTIME_TOKEN to a random secret}
+      WORKER_ALLOWED_HARNESS: codex
+    volumes:
+      - worker_workspace:/workspace
+      - worker_artifacts:/artifacts
+      - codex_auth:/auth/codex
+    user: "0:0"
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8090/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+
+  claude-runtime:
+    image: ${WORKER_RUNTIME_IMAGE:-ai-multiplayer-chat/worker-runtime:local}
+    environment:
+      WORKER_RUNTIME_TOKEN: ${FIELDWORK_RUNTIME_TOKEN:?set FIELDWORK_RUNTIME_TOKEN to a random secret}
+      WORKER_ALLOWED_HARNESS: claude_code
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+    volumes:
+      - worker_workspace:/workspace
+      - worker_artifacts:/artifacts
+      - claude_auth:/auth/claude
+    user: "0:0"
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8090/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+
+  opencode-runtime:
+    image: ${WORKER_RUNTIME_IMAGE:-ai-multiplayer-chat/worker-runtime:local}
+    environment:
+      WORKER_RUNTIME_TOKEN: ${FIELDWORK_RUNTIME_TOKEN:?set FIELDWORK_RUNTIME_TOKEN to a random secret}
+      WORKER_ALLOWED_HARNESS: opencode
+    volumes:
+      - worker_workspace:/workspace
+      - worker_artifacts:/artifacts
+      - opencode_auth:/auth/opencode
+    user: "0:0"
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8090/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
+
+  pi-runtime:
+    image: ${WORKER_RUNTIME_IMAGE:-ai-multiplayer-chat/worker-runtime:local}
+    environment:
+      WORKER_RUNTIME_TOKEN: ${FIELDWORK_RUNTIME_TOKEN:?set FIELDWORK_RUNTIME_TOKEN to a random secret}
+      WORKER_ALLOWED_HARNESS: pi
+    volumes:
+      - worker_workspace:/workspace
+      - worker_artifacts:/artifacts
+      - pi_auth:/auth/pi
+    user: "0:0"
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m,mode=1777
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8090/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 30
 
   langgraph-service:
     image: ${LANGGRAPH_IMAGE:-ai-multiplayer-chat/langgraph-service:local}
@@ -49,16 +193,22 @@ services:
       LANGGRAPH_POSTGRES_DSN: postgresql://postgres:postgres@postgres:5432/langgraph
       LANGGRAPH_REDIS_URL: redis://redis:6379/0
       LANGGRAPH_OLLAMA_PRIMARY_BASE_URL: ${LANGGRAPH_OLLAMA_PRIMARY_BASE_URL:-http://host.docker.internal:11434}
-      LANGGRAPH_OLLAMA_PRIMARY_MODEL: ${LANGGRAPH_OLLAMA_PRIMARY_MODEL:-kimi-k2.5:cloud}
+      LANGGRAPH_OLLAMA_PRIMARY_MODEL: ${LANGGRAPH_OLLAMA_PRIMARY_MODEL:-kimi-k2.7-code:cloud}
       LANGGRAPH_OLLAMA_FALLBACK_CLOUD_BASE_URL: ${LANGGRAPH_OLLAMA_FALLBACK_CLOUD_BASE_URL:-http://host.docker.internal:11434}
-      LANGGRAPH_OLLAMA_FALLBACK_CLOUD_MODEL: ${LANGGRAPH_OLLAMA_FALLBACK_CLOUD_MODEL:-qwen3-vl:235b-cloud}
-      LANGGRAPH_OLLAMA_FALLBACK_LOCAL_BASE_URL: ${LANGGRAPH_OLLAMA_FALLBACK_LOCAL_BASE_URL:-http://host.docker.internal:11434}
-      LANGGRAPH_OLLAMA_FALLBACK_LOCAL_MODEL: ${LANGGRAPH_OLLAMA_FALLBACK_LOCAL_MODEL:-gpt-oss:20b}
+      LANGGRAPH_OLLAMA_FALLBACK_CLOUD_MODEL: ${LANGGRAPH_OLLAMA_FALLBACK_CLOUD_MODEL:-gpt-oss:120b-cloud}
+      LANGGRAPH_WORKER_RUNTIME_URL: http://worker-runtime:8090
+      LANGGRAPH_CODEX_RUNTIME_URL: http://codex-runtime:8090
+      LANGGRAPH_CLAUDE_RUNTIME_URL: http://claude-runtime:8090
+      LANGGRAPH_OPENCODE_RUNTIME_URL: http://opencode-runtime:8090
+      LANGGRAPH_PI_RUNTIME_URL: http://pi-runtime:8090
+      LANGGRAPH_RUNTIME_TOKEN: ${FIELDWORK_RUNTIME_TOKEN:?set FIELDWORK_RUNTIME_TOKEN to a random secret}
+      LANGGRAPH_SERVICE_TOKEN: ${FIELDWORK_LANGGRAPH_TOKEN:?set FIELDWORK_LANGGRAPH_TOKEN to a random secret}
       LANGGRAPH_AGENT_PROMPT_MANIFEST_PATH: ${LANGGRAPH_AGENT_PROMPT_MANIFEST_PATH:-agent_prompts/system_prompt.yaml}
       LANGGRAPH_AGENT_PROMPT_HUB_IDENTIFIER: ${LANGGRAPH_AGENT_PROMPT_HUB_IDENTIFIER:-}
-      LANGGRAPH_AGENT_SYSTEM_PROMPT_FALLBACK: ${LANGGRAPH_AGENT_SYSTEM_PROMPT_FALLBACK:-You are the orchestration agent for a multi-service chat platform.}
+      LANGGRAPH_AGENT_SYSTEM_PROMPT_FALLBACK: ${LANGGRAPH_AGENT_SYSTEM_PROMPT_FALLBACK:-You are Moss, a dependable digital worker.}
       LANGGRAPH_LANGSMITH_TRACING: ${LANGGRAPH_LANGSMITH_TRACING:-true}
       LANGGRAPH_LANGSMITH_PROJECT: ${LANGGRAPH_LANGSMITH_PROJECT:-ai-multiplayer-chat}
+      LANGGRAPH_WORKSPACE_ROOT: /workspace
       LANGSMITH_API_KEY: ${LANGSMITH_API_KEY:-}
       LANGSMITH_ENDPOINT: ${LANGSMITH_ENDPOINT:-https://api.smith.langchain.com}
     extra_hosts:
@@ -68,8 +218,20 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
-    ports:
-      - "${LANGGRAPH_PORT:-8080}:8080"
+      worker-runtime:
+        condition: service_healthy
+      codex-runtime:
+        condition: service_healthy
+      claude-runtime:
+        condition: service_healthy
+      opencode-runtime:
+        condition: service_healthy
+      pi-runtime:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')"]
       interval: 10s
@@ -84,18 +246,26 @@ services:
     environment:
       BACKEND_DYNAMODB_ENDPOINT_URL: http://dynamodb-local:8000
       BACKEND_LANGGRAPH_SERVICE_URL: http://langgraph-service:8080
+      BACKEND_LANGGRAPH_SERVICE_TOKEN: ${FIELDWORK_LANGGRAPH_TOKEN:?set FIELDWORK_LANGGRAPH_TOKEN to a random secret}
+      BACKEND_WORKER_RUNTIME_URL: http://worker-runtime:8090
+      BACKEND_RUNTIME_TOKEN: ${FIELDWORK_RUNTIME_TOKEN:?set FIELDWORK_RUNTIME_TOKEN to a random secret}
       BACKEND_DYNAMODB_TABLE_NAME: ${BACKEND_DYNAMODB_TABLE_NAME:-application_thread_mapping}
       BACKEND_DYNAMODB_REGION: ${BACKEND_DYNAMODB_REGION:-us-east-1}
       BACKEND_DYNAMODB_ACCESS_KEY_ID: ${BACKEND_DYNAMODB_ACCESS_KEY_ID:-dummy}
       BACKEND_DYNAMODB_SECRET_ACCESS_KEY: ${BACKEND_DYNAMODB_SECRET_ACCESS_KEY:-dummy}
       BACKEND_APPLICATION_ID_PREFIX: ${BACKEND_APPLICATION_ID_PREFIX:-app}
+      BACKEND_ROOM_TOKEN_SECRET: ${FIELDWORK_ROOM_TOKEN_SECRET:?set FIELDWORK_ROOM_TOKEN_SECRET to a random secret}
     depends_on:
       dynamodb-local:
         condition: service_started
       langgraph-service:
         condition: service_healthy
     ports:
-      - "${BACKEND_PORT:-18000}:8000"
+      - "127.0.0.1:${BACKEND_PORT:-18000}:8000"
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 10s
@@ -114,12 +284,43 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - "${FRONTEND_PORT:-5173}:80"
+      - "127.0.0.1:${FRONTEND_PORT:-5173}:80"
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost/health"]
       interval: 15s
       timeout: 5s
       retries: 10
 
+  telegram-gateway:
+    profiles: ["telegram"]
+    build:
+      context: .
+      dockerfile: integrations/telegram_gateway/Dockerfile
+    environment:
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN:-}
+      TELEGRAM_ALLOWED_CHAT_IDS: ${TELEGRAM_ALLOWED_CHAT_IDS:-}
+      BACKEND_HTTP_URL: http://backend:8000
+      BACKEND_WS_URL: ws://backend:8000
+      FRONTEND_PUBLIC_URL: ${FRONTEND_PUBLIC_URL:-http://localhost:5173}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      TELEGRAM_TRANSCRIPTION_MODEL: ${TELEGRAM_TRANSCRIPTION_MODEL:-gpt-4o-mini-transcribe}
+      TELEGRAM_HARNESS: ${TELEGRAM_HARNESS:-langgraph}
+    depends_on:
+      backend:
+        condition: service_healthy
+    volumes:
+      - telegram_data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
 volumes:
   postgres_data:
+  telegram_data:
+  worker_workspace:
+  worker_artifacts:
+  codex_auth:
+  claude_auth:
+  opencode_auth:
+  pi_auth:

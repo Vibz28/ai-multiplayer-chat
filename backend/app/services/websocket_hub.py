@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from fastapi import WebSocket
+from fastapi import WebSocket, WebSocketDisconnect
 
 
 @dataclass(frozen=True)
@@ -23,8 +23,14 @@ class WebSocketHub:
         self._generation_locks: dict[str, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._lock = asyncio.Lock()
 
-    async def connect(self, application_id: str, websocket: WebSocket) -> None:
-        await websocket.accept()
+    async def connect(
+        self,
+        application_id: str,
+        websocket: WebSocket,
+        *,
+        subprotocol: str | None = None,
+    ) -> None:
+        await websocket.accept(subprotocol=subprotocol or None)
         async with self._lock:
             self._connections[application_id].add(websocket)
             self._participants[application_id].setdefault(
@@ -49,8 +55,6 @@ class WebSocketHub:
                     self._participants.pop(application_id, None)
             if not clients:
                 self._connections.pop(application_id, None)
-            if application_id not in self._connections:
-                self._generation_locks.pop(application_id, None)
 
     async def set_participant(
         self,
@@ -124,7 +128,7 @@ class WebSocketHub:
         for websocket in targets:
             try:
                 await websocket.send_json(event)
-            except RuntimeError:
+            except (RuntimeError, WebSocketDisconnect):
                 stale_connections.append(websocket)
 
         if stale_connections:
@@ -140,7 +144,6 @@ class WebSocketHub:
                 if not clients:
                     self._connections.pop(application_id, None)
                     self._participants.pop(application_id, None)
-                    self._generation_locks.pop(application_id, None)
 
     async def connection_count(self, application_id: str) -> int:
         async with self._lock:

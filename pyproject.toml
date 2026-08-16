@@ -1,7 +1,7 @@
 [tool.pytest.ini_options]
-pythonpath = ["backend", "langgraph_service"]
+pythonpath = ["backend", "langgraph_service", "."]
 asyncio_mode = "auto"
-testpaths = ["backend/tests", "langgraph_service/tests"]
+testpaths = ["backend/tests", "langgraph_service/tests", "worker_runtime/tests"]
 
 [tool.ruff]
 line-length = 100

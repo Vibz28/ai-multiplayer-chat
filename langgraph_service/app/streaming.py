@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from typing import Any
@@ -10,7 +11,7 @@ from fastapi import HTTPException
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 
 from app.agent import coerce_message_content
-from app.agent_tooling import get_checklist_items
+from app.agent_tooling import clear_checklist, get_checklist_items
 from app.diagnostics import (
     build_event,
     build_run_diagnostics,
@@ -19,9 +20,22 @@ from app.diagnostics import (
     extract_token_usage,
     extract_tool_calls,
 )
+from app.harness_client import run_harness
 from app.history_store import persist_history_entry
 from app.runtime import state
 from app.schemas import AgentRunRequest
+
+LOGGER = logging.getLogger("fieldwork.langgraph")
+
+TOOL_PROGRESS = {
+    "manage_checklist": "Moss updated the work plan.",
+    "workspace_search": "Moss reviewed the workspace.",
+    "workspace_read": "Moss reviewed a workspace file.",
+    "workspace_edit": "Moss updated the workspace.",
+    "workspace_exec": "Moss ran a verification step.",
+    "fetch_web": "Moss checked a public source.",
+    "register_artifact": "Moss prepared a deliverable for review.",
+}
 
 
 def _graph_payload(request: AgentRunRequest) -> dict[str, Any]:
@@ -51,6 +65,42 @@ async def invoke_agent(
     trace_id: str,
     started_at: datetime,
 ) -> tuple[str, list[str], dict[str, Any]]:
+    if request.harness != "langgraph":
+        try:
+            result = await run_harness(request)
+        except Exception as exc:
+            LOGGER.exception("%s harness invocation failed", request.harness)
+            message = "Moss could not start the selected harness. Check its sign-in and try again."
+            raise HTTPException(
+                status_code=502,
+                detail={
+                    "message": message,
+                    "run": build_run_diagnostics(
+                        request=request,
+                        run_id=run_id,
+                        trace_id=trace_id,
+                        status="error",
+                        started_at=started_at,
+                        finished_at=datetime.now(UTC),
+                        error=message,
+                    ),
+                },
+            ) from exc
+        answer = str(result.get("answer_markdown", "")).strip()
+        run = build_run_diagnostics(
+            request=request,
+            run_id=run_id,
+            trace_id=trace_id,
+            status="completed",
+            started_at=started_at,
+            finished_at=datetime.now(UTC),
+            model_selected=request.harness,
+            output_characters=len(answer),
+            output_preview=answer,
+        )
+        run["worker_duration_ms"] = result.get("duration_ms")
+        return answer, [], run
+
     if state.agent_graph is None:
         message = "Agent graph not initialized"
         raise HTTPException(
@@ -165,6 +215,9 @@ async def agent_event_stream(request: AgentRunRequest) -> AsyncIterator[bytes]:
     )
     yield f"{initial.model_dump_json()}\n".encode()
 
+    if request.harness != "langgraph":
+        clear_checklist(request.thread_id)
+
     checklist_signature = ""
 
     def build_checklist_event(stream_state: str) -> bytes | None:
@@ -196,8 +249,92 @@ async def agent_event_stream(request: AgentRunRequest) -> AsyncIterator[bytes]:
         content=request.message,
         run_id=run_id,
         trace_id=trace_id,
-        metadata={"source": "agent_stream"},
+        metadata={"source": "agent_stream", "harness": request.harness},
     )
+
+    if request.harness != "langgraph":
+        try:
+            answer_markdown, _, run = await invoke_agent(
+                request,
+                run_id=run_id,
+                trace_id=trace_id,
+                started_at=started_at,
+            )
+        except HTTPException as exc:
+            detail = exc.detail if isinstance(exc.detail, dict) else {}
+            message = str(detail.get("message", "Moss could not start the selected harness."))
+            run = detail.get("run")
+            if not isinstance(run, dict):
+                run = build_run_diagnostics(
+                    request=request,
+                    run_id=run_id,
+                    trace_id=trace_id,
+                    status="error",
+                    started_at=started_at,
+                    finished_at=datetime.now(UTC),
+                    error=message,
+                )
+            error_event = build_event(
+                event_type="error",
+                stream_state="error",
+                application_id=request.application_id,
+                thread_id=request.thread_id,
+                payload={"message": message, "run": run},
+            )
+            yield f"{error_event.model_dump_json()}\n".encode()
+            await persist_history_entry(
+                application_id=request.application_id,
+                thread_id=request.thread_id,
+                profile_id=request.profile_id,
+                role="system",
+                channel="error",
+                content=message,
+                run_id=run_id,
+                trace_id=trace_id,
+                metadata={"run": run},
+            )
+            return
+
+        for content_chunk in chunk_text(answer_markdown):
+            content_event = build_event(
+                event_type="content",
+                stream_state="generating",
+                application_id=request.application_id,
+                thread_id=request.thread_id,
+                payload={"delta": content_chunk},
+            )
+            yield f"{content_event.model_dump_json()}\n".encode()
+        completion = build_event(
+            event_type="complete",
+            stream_state="completed",
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            payload={"message": "completed", "run": run},
+        )
+        yield f"{completion.model_dump_json()}\n".encode()
+        await persist_history_entry(
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            profile_id=request.profile_id,
+            role="assistant",
+            channel="transcript",
+            content=answer_markdown,
+            run_id=run_id,
+            trace_id=trace_id,
+            metadata={"streamed": True, "harness": request.harness},
+        )
+        await persist_history_entry(
+            application_id=request.application_id,
+            thread_id=request.thread_id,
+            profile_id=request.profile_id,
+            role="system",
+            channel="diagnostics",
+            content="run_diagnostics",
+            run_id=run_id,
+            trace_id=trace_id,
+            metadata={"run": run},
+        )
+        return
 
     if state.agent_graph is None:
         message = "Agent graph not initialized"
@@ -249,10 +386,8 @@ async def agent_event_stream(request: AgentRunRequest) -> AsyncIterator[bytes]:
                 continue
 
             if event_name == "on_tool_end":
-                raw_output = payload.get("output")
-                reasoning_text = coerce_message_content(getattr(raw_output, "content", raw_output))
-                if not reasoning_text:
-                    continue
+                tool_name = str(stream_event.get("name", ""))
+                reasoning_text = TOOL_PROGRESS.get(tool_name, "Moss completed a work step.")
                 tool_messages.append(reasoning_text)
                 for reasoning_chunk in chunk_text(reasoning_text):
                     reasoning_chunk_count += 1
@@ -296,8 +431,13 @@ async def agent_event_stream(request: AgentRunRequest) -> AsyncIterator[bytes]:
                     candidate = output.get("message") or output.get("output")
                     if isinstance(candidate, AIMessage):
                         assistant_messages.append(candidate)
-    except Exception as exc:
-        message = f"Agent stream failed: {exc}"
+    except Exception:
+        LOGGER.exception(
+            "Agent stream failed for application %s and thread %s",
+            request.application_id,
+            request.thread_id,
+        )
+        message = "Moss could not start the work. Please try again in a moment."
         run = build_run_diagnostics(
             request=request,
             run_id=run_id,

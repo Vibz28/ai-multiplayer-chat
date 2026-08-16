@@ -60,29 +60,38 @@ class LangGraphClientProtocol(Protocol):
         thread_id: str,
         profile_id: str | None,
         message: str,
+        harness: str,
     ) -> AsyncIterator[dict[str, object]]:
         ...
 
 
 class LangGraphClient:
-    def __init__(self, base_url: str, timeout_seconds: float = 10.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        timeout_seconds: float = 10.0,
+        service_token: str = "",
+    ) -> None:
         self._base_url = base_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
+        self._headers = {"X-Fieldwork-Service-Token": service_token}
 
     async def health(self) -> bool:
         try:
             async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
                 response = await client.get(f"{self._base_url}/health")
                 response.raise_for_status()
-            return True
-        except httpx.HTTPError:
+            return response.json().get("status") == "ok"
+        except (httpx.HTTPError, ValueError):
             return False
 
     async def create_thread(self, application_id: str) -> str:
         payload = {"application_id": application_id}
         try:
             async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
-                response = await client.post(f"{self._base_url}/threads", json=payload)
+                response = await client.post(
+                    f"{self._base_url}/threads", json=payload, headers=self._headers
+                )
                 response.raise_for_status()
         except httpx.HTTPError as exc:
             raise LangGraphClientError("Unable to create thread via LangGraph service") from exc
@@ -105,6 +114,7 @@ class LangGraphClient:
                 response = await client.get(
                     f"{self._base_url}/threads/{thread_id}/history",
                     params=params,
+                    headers=self._headers,
                 )
                 response.raise_for_status()
         except httpx.HTTPError as exc:
@@ -124,7 +134,9 @@ class LangGraphClient:
     async def get_thread_checklist(self, *, thread_id: str) -> list[ThreadChecklistItem]:
         try:
             async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
-                response = await client.get(f"{self._base_url}/threads/{thread_id}/checklist")
+                response = await client.get(
+                    f"{self._base_url}/threads/{thread_id}/checklist", headers=self._headers
+                )
                 response.raise_for_status()
         except httpx.HTTPError as exc:
             raise LangGraphClientError("Unable to fetch thread checklist from LangGraph service") from exc
@@ -162,12 +174,14 @@ class LangGraphClient:
         thread_id: str,
         profile_id: str | None,
         message: str,
+        harness: str,
     ) -> AsyncIterator[dict[str, object]]:
         payload = {
             "application_id": application_id,
             "thread_id": thread_id,
             "profile_id": profile_id,
             "message": message,
+            "harness": harness,
         }
 
         try:
@@ -176,6 +190,7 @@ class LangGraphClient:
                     "POST",
                     f"{self._base_url}/agent/stream",
                     json=payload,
+                    headers=self._headers,
                 ) as response:
                     response.raise_for_status()
                     async for line in response.aiter_lines():

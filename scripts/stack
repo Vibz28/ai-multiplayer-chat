@@ -14,6 +14,19 @@ export BACKEND_PORT="${BACKEND_PORT:-18000}"
 export LANGGRAPH_PORT="${LANGGRAPH_PORT:-8080}"
 export FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 
+ensure_local_secrets() {
+  local env_file="$repo_root/.env"
+  local name
+  umask 077
+  touch "$env_file"
+  for name in FIELDWORK_RUNTIME_TOKEN FIELDWORK_LANGGRAPH_TOKEN FIELDWORK_ROOM_TOKEN_SECRET; do
+    if [[ -n "${!name:-}" ]] || grep -Eq "^${name}=.+$" "$env_file"; then
+      continue
+    fi
+    printf '%s=%s\n' "$name" "$(openssl rand -hex 32)" >> "$env_file"
+  done
+}
+
 compose() {
   (cd "$repo_root" && docker compose -f "$compose_file" "$@")
 }
@@ -25,11 +38,13 @@ Usage: scripts/stack <command>
 Commands:
   up           Build and start the full stack (frontend + backend + langgraph + stores)
   up-core      Build and start backend/langgraph/stores only (no frontend container)
+  up-telegram  Start the full stack with the optional Telegram voice-note bridge
   down         Stop and remove stack containers
   restart      Recreate full stack
   status       Show container status
   logs [svc]   Tail logs (all services or one service)
   smoke        Run health checks against backend/langgraph/frontend
+  auth <name>  Sign in a harness (codex, claude, opencode, or pi)
   frontend-dev Run frontend in Bun dev mode against containerized backend
 USAGE
 }
@@ -69,6 +84,10 @@ warn_loopback_frontend_conflict() {
 
 cmd="${1:-}"; shift || true
 
+if [[ "$cmd" != "help" && "$cmd" != "--help" && "$cmd" != "-h" ]]; then
+  ensure_local_secrets
+fi
+
 case "$cmd" in
   help|--help|-h)
     usage
@@ -80,7 +99,12 @@ case "$cmd" in
     ;;
   up-core)
     "$repo_root/scripts/check-repo-hygiene"
-    compose up -d --build --wait --wait-timeout "$wait_timeout" postgres redis dynamodb-local langgraph-service backend
+    compose up -d --build --wait --wait-timeout "$wait_timeout" postgres redis dynamodb-local worker-runtime codex-runtime claude-runtime opencode-runtime pi-runtime langgraph-service backend
+    ;;
+  up-telegram)
+    "$repo_root/scripts/check-repo-hygiene"
+    compose --profile telegram up -d --build --wait --wait-timeout "$wait_timeout"
+    warn_loopback_frontend_conflict
     ;;
   down)
     compose down
@@ -111,14 +135,45 @@ case "$cmd" in
     ;;
   smoke)
     compose ps
+    compose exec -T worker-runtime curl -fsS http://localhost:8090/health >/dev/null
+    compose exec -T codex-runtime curl -fsS http://localhost:8090/health >/dev/null
+    compose exec -T claude-runtime curl -fsS http://localhost:8090/health >/dev/null
+    compose exec -T opencode-runtime curl -fsS http://localhost:8090/health >/dev/null
+    compose exec -T pi-runtime curl -fsS http://localhost:8090/health >/dev/null
     health_check "http://localhost:${BACKEND_PORT}/health"
-    health_check "http://localhost:${LANGGRAPH_PORT}/health"
+    compose exec -T langgraph-service python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')" >/dev/null
     health_check "http://localhost:${FRONTEND_PORT}/health"
     warn_loopback_frontend_conflict
     echo "Smoke checks passed:"
     echo "  frontend:  http://localhost:${FRONTEND_PORT}"
     echo "  backend:   http://localhost:${BACKEND_PORT}"
-    echo "  langgraph: http://localhost:${LANGGRAPH_PORT}"
+    echo "  langgraph: internal service healthy"
+    ;;
+  auth)
+    harness="${1:-}"
+    case "$harness" in
+      codex)
+        compose up -d --build codex-runtime
+        compose exec --env HOME=/auth/codex --env CODEX_HOME=/auth/codex codex-runtime codex login --device-auth
+        ;;
+      claude|claude_code)
+        compose up -d --build claude-runtime
+        compose exec --env HOME=/auth/claude --env CLAUDE_CONFIG_DIR=/auth/claude claude-runtime claude auth login
+        ;;
+      opencode)
+        compose up -d --build opencode-runtime
+        compose exec --env HOME=/auth/opencode opencode-runtime opencode auth login --provider openai
+        ;;
+      pi)
+        echo "Run /login in Pi, then exit when authentication is complete."
+        compose up -d --build pi-runtime
+        compose exec --env HOME=/auth/pi --env PI_CODING_AGENT_DIR=/auth/pi pi-runtime pi --no-extensions --no-skills
+        ;;
+      *)
+        echo "auth requires one of: codex, claude, opencode, pi" >&2
+        exit 1
+        ;;
+    esac
     ;;
   frontend-dev)
     if [[ "${STACK_FRONTEND_DEV_DRY_RUN:-0}" == "1" ]]; then

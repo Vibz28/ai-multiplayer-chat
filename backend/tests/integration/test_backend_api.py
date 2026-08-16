@@ -27,6 +27,7 @@ class InMemoryLangGraphClient:
         self._counters = defaultdict(int)
         self._history: dict[str, list[dict[str, object]]] = defaultdict(list)
         self._checklists: dict[str, list[dict[str, object]]] = defaultdict(list)
+        self.last_harness: str | None = None
 
     async def health(self) -> bool:
         return True
@@ -57,7 +58,9 @@ class InMemoryLangGraphClient:
         thread_id: str,
         profile_id: str | None,
         message: str,
+        harness: str,
     ):
+        self.last_harness = harness
         now = datetime.now(UTC)
         user_entry = ThreadHistoryEntry(
             application_id=application_id,
@@ -77,7 +80,7 @@ class InMemoryLangGraphClient:
             profile_id=profile_id,
             role="assistant",
             channel="transcript",
-            content=f"content for {message}",
+            content=f"content for {message} via {harness}",
             run_id="run_fake",
             trace_id="trace_fake",
             metadata={},
@@ -97,7 +100,7 @@ class InMemoryLangGraphClient:
         yield {
             "type": "content",
             "stream_state": "generating",
-            "payload": {"delta": f"content for {message}"},
+            "payload": {"delta": f"content for {message} via {harness}"},
         }
         yield {
             "type": "complete",
@@ -137,6 +140,10 @@ def build_test_client() -> TestClient:
     return TestClient(app)
 
 
+def auth(room_token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {room_token}"}
+
+
 def test_rest_session_and_thread_resolution() -> None:
     with build_test_client() as client:
         create_response = client.post("/v1/sessions", json={"profile_id": "alpha", "role": "member"})
@@ -150,11 +157,15 @@ def test_rest_session_and_thread_resolution() -> None:
         assert payload["langsmith_trace_id"] is None
 
         application_id = payload["application_id"]
-        read_response = client.get(f"/v1/sessions/{application_id}")
+        room_token = payload["room_token"]
+        assert room_token
+        read_response = client.get(f"/v1/sessions/{application_id}", headers=auth(room_token))
         assert read_response.status_code == 200
         assert read_response.json()["application_id"] == application_id
 
-        thread_response = client.post(f"/v1/sessions/{application_id}/thread")
+        thread_response = client.post(
+            f"/v1/sessions/{application_id}/thread", headers=auth(room_token)
+        )
         assert thread_response.status_code == 200
         thread_payload = thread_response.json()
         assert thread_payload["application_id"] == application_id
@@ -185,8 +196,11 @@ def test_websocket_event_channels_are_distinct() -> None:
     with build_test_client() as client:
         create_response = client.post("/v1/sessions", json={"profile_id": "beta"})
         application_id = create_response.json()["application_id"]
+        room_token = create_response.json()["room_token"]
 
-        with client.websocket_connect(f"/ws/{application_id}") as websocket:
+        with client.websocket_connect(
+            f"/ws/{application_id}", subprotocols=[f"fieldwork.{room_token}"]
+        ) as websocket:
             connection_event = websocket.receive_json()
             assert connection_event["type"] == "connection"
 
@@ -195,7 +209,7 @@ def test_websocket_event_channels_are_distinct() -> None:
             assert ping_event["type"] == "status"
             assert ping_event["payload"]["message"] == "pong"
 
-            websocket.send_json({"type": "user_message", "content": "hello"})
+            websocket.send_json({"type": "user_message", "content": "hello", "harness": "codex"})
 
             user_event = websocket.receive_json()
             status_event = websocket.receive_json()
@@ -220,6 +234,8 @@ def test_websocket_event_channels_are_distinct() -> None:
             assert complete_event["thread_id"] == thread_id
             assert "delta" in reasoning_event["payload"]
             assert "delta" in content_event["payload"]
+            assert content_event["payload"]["delta"].endswith("via codex")
+            assert content_event["payload"]["harness"] == "codex"
 
     app.dependency_overrides.clear()
 
@@ -228,17 +244,24 @@ def test_history_endpoint_reads_canonical_langgraph_history() -> None:
     with build_test_client() as client:
         create_response = client.post("/v1/sessions", json={"profile_id": "gamma", "role": "admin"})
         application_id = create_response.json()["application_id"]
+        room_token = create_response.json()["room_token"]
 
-        thread_response = client.post(f"/v1/sessions/{application_id}/thread")
+        thread_response = client.post(
+            f"/v1/sessions/{application_id}/thread", headers=auth(room_token)
+        )
         assert thread_response.status_code == 200
 
-        with client.websocket_connect(f"/ws/{application_id}") as websocket:
+        with client.websocket_connect(
+            f"/ws/{application_id}", subprotocols=[f"fieldwork.{room_token}"]
+        ) as websocket:
             websocket.receive_json()  # connection
             websocket.send_json({"type": "user_message", "content": "history test"})
             for _ in range(6):
                 websocket.receive_json()
 
-        history_response = client.get(f"/v1/sessions/{application_id}/history?limit=50")
+        history_response = client.get(
+            f"/v1/sessions/{application_id}/history?limit=50", headers=auth(room_token)
+        )
         assert history_response.status_code == 200
         payload = history_response.json()
         assert payload["application_id"] == application_id
@@ -249,7 +272,9 @@ def test_history_endpoint_reads_canonical_langgraph_history() -> None:
         assert "user" in roles
         assert "assistant" in roles
 
-        session_response = client.get(f"/v1/sessions/{application_id}")
+        session_response = client.get(
+            f"/v1/sessions/{application_id}", headers=auth(room_token)
+        )
         assert session_response.status_code == 200
         session_payload = session_response.json()
         assert session_payload["workflow_id"] == "run_fake"
@@ -262,16 +287,23 @@ def test_checklist_endpoint_reads_canonical_langgraph_checklist() -> None:
     with build_test_client() as client:
         create_response = client.post("/v1/sessions", json={"profile_id": "delta", "role": "member"})
         application_id = create_response.json()["application_id"]
-        thread_response = client.post(f"/v1/sessions/{application_id}/thread")
+        room_token = create_response.json()["room_token"]
+        thread_response = client.post(
+            f"/v1/sessions/{application_id}/thread", headers=auth(room_token)
+        )
         assert thread_response.status_code == 200
 
-        with client.websocket_connect(f"/ws/{application_id}") as websocket:
+        with client.websocket_connect(
+            f"/ws/{application_id}", subprotocols=[f"fieldwork.{room_token}"]
+        ) as websocket:
             websocket.receive_json()  # connection
             websocket.send_json({"type": "user_message", "content": "checklist sync test"})
             for _ in range(6):
                 websocket.receive_json()
 
-        checklist_response = client.get(f"/v1/sessions/{application_id}/checklist")
+        checklist_response = client.get(
+            f"/v1/sessions/{application_id}/checklist", headers=auth(room_token)
+        )
         assert checklist_response.status_code == 200
         payload = checklist_response.json()
         assert payload["application_id"] == application_id
@@ -282,55 +314,54 @@ def test_checklist_endpoint_reads_canonical_langgraph_checklist() -> None:
     app.dependency_overrides.clear()
 
 
-def test_direct_user_to_user_message_only_targets_profiles() -> None:
+def test_direct_messages_are_rejected_without_participant_identity() -> None:
     with build_test_client() as client:
         create_response = client.post("/v1/sessions", json={"profile_id": "host", "role": "member"})
         application_id = create_response.json()["application_id"]
-        client.post(f"/v1/sessions/{application_id}/thread")
+        room_token = create_response.json()["room_token"]
+        client.post(f"/v1/sessions/{application_id}/thread", headers=auth(room_token))
 
-        with client.websocket_connect(f"/ws/{application_id}") as ws_a:
+        with client.websocket_connect(
+            f"/ws/{application_id}", subprotocols=[f"fieldwork.{room_token}"]
+        ) as ws_a:
             ws_a.receive_json()  # connection
             ws_a.send_json({"type": "join", "profile_id": "alice", "role": "member"})
             ws_a.receive_json()  # participant_join
 
-            with client.websocket_connect(f"/ws/{application_id}") as ws_b:
-                ws_b.receive_json()  # connection
-                ws_b.send_json({"type": "join", "profile_id": "bob", "role": "member"})
-                ws_b.receive_json()  # participant_join broadcast
-                ws_a.receive_json()  # participant_join broadcast for alice socket
+            ws_a.send_json(
+                {
+                    "type": "user_message",
+                    "content": "private hi",
+                    "profile_id": "alice",
+                    "delivery_mode": "direct",
+                    "recipient_profile_ids": ["bob"],
+                    "include_ai": False,
+                }
+            )
+            rejected = ws_a.receive_json()
+            assert rejected["type"] == "error"
+            assert rejected["payload"]["message"] == "Invalid payload"
 
-                ws_a.send_json(
-                    {
-                        "type": "user_message",
-                        "content": "private hi",
-                        "profile_id": "alice",
-                        "delivery_mode": "direct",
-                        "recipient_profile_ids": ["bob"],
-                        "include_ai": False,
-                    }
-                )
+    app.dependency_overrides.clear()
 
-                event_for_alice = None
-                event_for_bob = None
-                for _ in range(6):
-                    if event_for_alice is None:
-                        candidate = ws_a.receive_json()
-                        if candidate["type"] == "user_message":
-                            event_for_alice = candidate
-                    if event_for_bob is None:
-                        candidate = ws_b.receive_json()
-                        if candidate["type"] == "user_message":
-                            event_for_bob = candidate
-                    if event_for_alice is not None and event_for_bob is not None:
-                        break
 
-                assert event_for_alice is not None
-                assert event_for_bob is not None
-                assert event_for_alice["type"] == "user_message"
-                assert event_for_bob["type"] == "user_message"
-                assert event_for_alice["payload"]["delivery_mode"] == "direct"
-                assert event_for_bob["payload"]["delivery_mode"] == "direct"
-                assert event_for_alice["payload"]["include_ai"] is False
-                assert event_for_bob["payload"]["include_ai"] is False
+def test_room_capability_is_required_for_session_data() -> None:
+    with build_test_client() as client:
+        created = client.post("/v1/sessions", json={"profile_id": "owner"}).json()
+        application_id = created["application_id"]
+
+        assert client.get(f"/v1/sessions/{application_id}").status_code == 401
+        assert client.get(f"/v1/sessions/{application_id}", headers=auth("wrong")).status_code == 403
+        assert client.get(f"/v1/sessions/{application_id}/artifacts").status_code == 401
+        assert (
+            client.get(f"/v1/sessions/{application_id}/artifacts", headers=auth("wrong")).status_code
+            == 403
+        )
+        assert (
+            client.get(
+                f"/v1/sessions/{application_id}", headers=auth(created["room_token"])
+            ).status_code
+            == 200
+        )
 
     app.dependency_overrides.clear()

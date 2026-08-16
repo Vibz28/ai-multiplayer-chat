@@ -58,6 +58,7 @@ registry="${account_id}.dkr.ecr.${region}.amazonaws.com"
 backend_repo="${repo_prefix}/backend"
 langgraph_repo="${repo_prefix}/langgraph-service"
 frontend_repo="${repo_prefix}/frontend"
+worker_runtime_repo="${repo_prefix}/worker-runtime"
 
 ensure_repo() {
   local repo_name="$1"
@@ -80,6 +81,7 @@ push_image() {
 ensure_repo "$backend_repo"
 ensure_repo "$langgraph_repo"
 ensure_repo "$frontend_repo"
+ensure_repo "$worker_runtime_repo"
 
 if $dry_run; then
   run_cmd aws ecr get-login-password --region "$region"
@@ -89,22 +91,25 @@ else
 fi
 
 if $dry_run; then
-  echo "[dry-run] cd \"$repo_root\" && BACKEND_IMAGE=\"ai-multiplayer-chat/backend:local\" LANGGRAPH_IMAGE=\"ai-multiplayer-chat/langgraph-service:local\" FRONTEND_IMAGE=\"ai-multiplayer-chat/frontend:local\" docker compose -f compose.yaml build backend langgraph-service frontend"
+  echo "[dry-run] cd \"$repo_root\" && BACKEND_IMAGE=\"ai-multiplayer-chat/backend:local\" LANGGRAPH_IMAGE=\"ai-multiplayer-chat/langgraph-service:local\" FRONTEND_IMAGE=\"ai-multiplayer-chat/frontend:local\" WORKER_RUNTIME_IMAGE=\"ai-multiplayer-chat/worker-runtime:local\" docker compose -f compose.yaml build backend langgraph-service frontend worker-runtime"
 else
   (
     cd "$repo_root"
     BACKEND_IMAGE="ai-multiplayer-chat/backend:local" \
     LANGGRAPH_IMAGE="ai-multiplayer-chat/langgraph-service:local" \
     FRONTEND_IMAGE="ai-multiplayer-chat/frontend:local" \
-    docker compose -f compose.yaml build backend langgraph-service frontend
+    WORKER_RUNTIME_IMAGE="ai-multiplayer-chat/worker-runtime:local" \
+    docker compose -f compose.yaml build backend langgraph-service frontend worker-runtime
   )
 fi
 
 push_image "ai-multiplayer-chat/backend:local" "${registry}/${backend_repo}:${image_tag}"
 push_image "ai-multiplayer-chat/langgraph-service:local" "${registry}/${langgraph_repo}:${image_tag}"
 push_image "ai-multiplayer-chat/frontend:local" "${registry}/${frontend_repo}:${image_tag}"
+push_image "ai-multiplayer-chat/worker-runtime:local" "${registry}/${worker_runtime_repo}:${image_tag}"
 
 echo "Published images:"
 echo "  ${registry}/${backend_repo}:${image_tag}"
 echo "  ${registry}/${langgraph_repo}:${image_tag}"
 echo "  ${registry}/${frontend_repo}:${image_tag}"
+echo "  ${registry}/${worker_runtime_repo}:${image_tag}"

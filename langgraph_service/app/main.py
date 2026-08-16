@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+import secrets
 from datetime import UTC, datetime
 from uuid import uuid4
 
 import asyncpg
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import StreamingResponse
+import httpx
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, StreamingResponse
 
 from app.agent_tooling import get_checklist_items
 from app.history_store import fetch_thread_history, persist_history_entry
@@ -25,6 +28,18 @@ from app.streaming import agent_event_stream, invoke_agent
 
 app = FastAPI(title=settings.api_title, lifespan=lifespan)
 
+
+@app.middleware("http")
+async def authenticate_service(request: Request, call_next):
+    if request.url.path == "/health":
+        return await call_next(request)
+    supplied = request.headers.get("x-fieldwork-service-token", "")
+    if not settings.service_token:
+        return JSONResponse(status_code=503, content={"detail": "service token is not configured"})
+    if not secrets.compare_digest(supplied, settings.service_token):
+        return JSONResponse(status_code=403, content={"detail": "invalid service token"})
+    return await call_next(request)
+
 # Backward-compatible alias for unit tests and internal imports.
 _agent_event_stream = agent_event_stream
 
@@ -34,10 +49,32 @@ async def health() -> HealthResponse:
     postgres_ok = await postgres_healthy()
     redis_ok = await redis_healthy()
     agent_ok = state.agent_graph is not None
-    status = "ok" if postgres_ok and redis_ok and agent_ok else "degraded"
+    runtime_urls = [
+        settings.worker_runtime_url,
+        settings.codex_runtime_url,
+        settings.claude_runtime_url,
+        settings.opencode_runtime_url,
+        settings.pi_runtime_url,
+    ]
+
+    async def runtime_ok(url: str) -> bool:
+        try:
+            async with httpx.AsyncClient(timeout=3) as client:
+                response = await client.get(f"{url.rstrip('/')}/health")
+            return response.status_code == 200 and response.json().get("status") == "ok"
+        except (httpx.HTTPError, ValueError):
+            return False
+
+    runtimes_ok = all(await asyncio.gather(*(runtime_ok(url) for url in runtime_urls)))
+    status = "ok" if postgres_ok and redis_ok and agent_ok and runtimes_ok else "degraded"
     return HealthResponse(
         status=status,
-        checks={"postgres": postgres_ok, "redis": redis_ok, "agent_graph": agent_ok},
+        checks={
+            "postgres": postgres_ok,
+            "redis": redis_ok,
+            "agent_graph": agent_ok,
+            "worker_runtimes": runtimes_ok,
+        },
     )
 
 
