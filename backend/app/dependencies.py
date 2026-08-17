@@ -24,7 +24,10 @@ def get_mapping_repository() -> DynamoDBMappingRepository:
 @lru_cache
 def get_langgraph_client() -> LangGraphClient:
     settings = get_settings()
-    return LangGraphClient(base_url=settings.langgraph_service_url)
+    return LangGraphClient(
+        base_url=settings.langgraph_service_url,
+        service_token=settings.langgraph_service_token,
+    )
 
 
 @lru_cache

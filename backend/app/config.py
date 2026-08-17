@@ -14,8 +14,14 @@ class Settings(BaseSettings):
     dynamodb_secret_access_key: str = "dummy"
 
     langgraph_service_url: str = "http://langgraph-service:8080"
+    langgraph_service_token: str = "local-langgraph-secret-change-me"
+    model_router_url: str = "http://model-router:8181"
+    model_router_token: str = ""
+    worker_runtime_url: str = "http://worker-runtime:8090"
+    runtime_token: str = "local-runtime-secret-change-me"
     application_id_prefix: str = "app"
     cors_allowed_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
+    room_token_secret: str = "local-development-secret-change-me"
 
     model_config = SettingsConfigDict(
         env_prefix="BACKEND_",

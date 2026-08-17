@@ -13,6 +13,12 @@ Optional env:
   ECS_BACKEND_SERVICE
   ECS_LANGGRAPH_SERVICE
   ECS_FRONTEND_SERVICE
+  ECS_WORKER_RUNTIME_SERVICE
+  ECS_MODEL_ROUTER_SERVICE
+  ECS_CODEX_RUNTIME_SERVICE
+  ECS_CLAUDE_RUNTIME_SERVICE
+  ECS_OPENCODE_RUNTIME_SERVICE
+  ECS_PI_RUNTIME_SERVICE
   DRY_RUN                (1/true/yes also enables dry-run)
 USAGE
 }
@@ -42,9 +48,15 @@ fi
 backend_service="${ECS_BACKEND_SERVICE:-}"
 langgraph_service="${ECS_LANGGRAPH_SERVICE:-}"
 frontend_service="${ECS_FRONTEND_SERVICE:-}"
+worker_runtime_service="${ECS_WORKER_RUNTIME_SERVICE:-}"
+model_router_service="${ECS_MODEL_ROUTER_SERVICE:-}"
+codex_runtime_service="${ECS_CODEX_RUNTIME_SERVICE:-}"
+claude_runtime_service="${ECS_CLAUDE_RUNTIME_SERVICE:-}"
+opencode_runtime_service="${ECS_OPENCODE_RUNTIME_SERVICE:-}"
+pi_runtime_service="${ECS_PI_RUNTIME_SERVICE:-}"
 
-if [[ -z "$backend_service" && -z "$langgraph_service" && -z "$frontend_service" ]]; then
-  echo "Set at least one of ECS_BACKEND_SERVICE, ECS_LANGGRAPH_SERVICE, ECS_FRONTEND_SERVICE" >&2
+if [[ -z "$backend_service" && -z "$langgraph_service" && -z "$frontend_service" && -z "$worker_runtime_service" && -z "$model_router_service" && -z "$codex_runtime_service" && -z "$claude_runtime_service" && -z "$opencode_runtime_service" && -z "$pi_runtime_service" ]]; then
+  echo "Set at least one ECS service environment variable" >&2
   exit 1
 fi
 
@@ -69,3 +81,9 @@ update_service() {
 update_service "$backend_service"
 update_service "$langgraph_service"
 update_service "$frontend_service"
+update_service "$worker_runtime_service"
+update_service "$model_router_service"
+update_service "$codex_runtime_service"
+update_service "$claude_runtime_service"
+update_service "$opencode_runtime_service"
+update_service "$pi_runtime_service"

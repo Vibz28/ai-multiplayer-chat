@@ -9,6 +9,8 @@ COPY backend/requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 COPY backend/app /app/app
+RUN useradd --create-home --uid 10001 worker && chown -R worker:worker /app
+USER worker
 
 EXPOSE 8000
 

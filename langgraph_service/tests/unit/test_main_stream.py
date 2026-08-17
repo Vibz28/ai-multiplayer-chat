@@ -59,6 +59,11 @@ AgentRunRequest = main_module.AgentRunRequest
 state = main_module.state
 
 
+def test_settings_reject_local_ollama_model() -> None:
+    with pytest.raises(ValueError, match="Ollama Cloud model allowlist"):
+        config_module.Settings(ollama_primary_model="gpt-oss:20b")
+
+
 class SuccessfulGraph:
     async def ainvoke(self, _payload: dict, config: dict) -> dict:
         del config
@@ -68,7 +73,7 @@ class SuccessfulGraph:
                 AIMessage(
                     content="final answer",
                     response_metadata={
-                        "model": "kimi-k2.5:cloud",
+                        "model": "kimi-k2.7-code:cloud",
                         "prompt_eval_count": 8,
                         "eval_count": 6,
                     },
@@ -98,7 +103,7 @@ class SuccessfulGraph:
                 "output": AIMessage(
                     content="final answer",
                     response_metadata={
-                        "model": "kimi-k2.5:cloud",
+                        "model": "kimi-k2.7-code:cloud",
                         "prompt_eval_count": 8,
                         "eval_count": 6,
                     },
@@ -161,10 +166,10 @@ async def test_agent_stream_emits_reasoning_content_and_complete() -> None:
     content_deltas = [event["payload"]["delta"] for event in events if event["type"] == "content"]
     completion_run = events[-1]["payload"]["run"]
 
-    assert "".join(reasoning_deltas) == "tool output"
+    assert "".join(reasoning_deltas) == "Moss completed a work step."
     assert "".join(content_deltas) == "final answer"
     assert completion_run["status"] == "completed"
-    assert completion_run["model_selected"] == "kimi-k2.5:cloud"
+    assert completion_run["model_selected"] == "kimi-k2.7-code:cloud"
     assert completion_run["token_usage"]["prompt_tokens"] == 8
     assert completion_run["token_usage"]["completion_tokens"] == 6
     assert completion_run["tool_call_count"] == 1
@@ -190,6 +195,38 @@ async def test_agent_stream_emits_error_event_on_failure() -> None:
 
     assert [event["type"] for event in events] == ["status", "checklist", "error"]
     assert events[2]["stream_state"] == "error"
-    assert "Agent stream failed" in events[2]["payload"]["message"]
+    assert events[2]["payload"]["message"] == (
+        "Moss could not start the work. Please try again in a moment."
+    )
     assert events[2]["payload"]["run"]["status"] == "error"
     assert events[2]["payload"]["run"]["error"] is not None
+
+
+@pytest.mark.asyncio
+async def test_agent_stream_dispatches_selected_cli_harness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_run_harness(request: AgentRunRequest) -> dict:
+        assert request.harness == "codex"
+        return {"answer_markdown": "Codex completed the workspace change.", "duration_ms": 42}
+
+    monkeypatch.setitem(
+        main_module.agent_event_stream.__globals__,
+        "run_harness",
+        fake_run_harness,
+    )
+    events = await collect_events(
+        AgentRunRequest(
+            application_id="app-stream",
+            thread_id="thread-stream",
+            profile_id="profile-stream",
+            message="change the file",
+            harness="codex",
+        )
+    )
+
+    assert [event["type"] for event in events] == ["status", "checklist", "content", "complete"]
+    assert events[2]["payload"]["delta"] == "Codex completed the workspace change."
+    run = events[3]["payload"]["run"]
+    assert run["requested_harness"] == "codex"
+    assert run["executed_harness"] == "codex"

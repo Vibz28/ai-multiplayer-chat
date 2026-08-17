@@ -7,6 +7,7 @@ This document defines the required packages, CLI tooling, and runtime configurat
 Install these in `langgraph_service`:
 
 - `langgraph==1.0.9`
+- `langgraph-prebuilt==1.0.8` (pinned for compatibility with LangGraph 1.0.9)
 - `langchain==1.2.10`
 - `langsmith==0.7.6`
 - `langchain-ollama==1.0.1`
@@ -33,14 +34,21 @@ The LangGraph service uses a hybrid model:
   - autonomous node: dynamic tool usage loop
   - post-node: finalize pipeline stage
 - Model fallback chain for robustness:
-  - primary: `kimi-k2.5:cloud`
-  - first fallback: `qwen3-vl:235b-cloud`
-  - second fallback: `gpt-oss:20b` (local Ollama)
+  - primary: `kimi-k2.7-code:cloud`
+  - fallback: `gpt-oss:120b-cloud`
+  - local model identifiers and local fallbacks are forbidden
 - Agent tooling includes:
   - `get_utc_time`
   - `add_numbers`
   - `describe_session_context`
   - `manage_checklist` (thread-scoped dynamic checklist maintenance tool)
+  - `workspace_search` (recursive paths and bounded literal text search)
+  - `workspace_read` (paged UTF-8 reads with SHA-256)
+  - `workspace_edit` (create and hash-checked replace/overwrite/delete)
+  - `workspace_exec` (argv-only bounded command execution in the credential-free runtime)
+  - `fetch_web` (bounded public HTTP/HTTPS fetch with private-address rejection)
+  - `register_artifact` (immutable review copy and metadata)
+- External harness dispatch includes pinned Claude Code, Codex, OpenCode, and Pi adapters; provider identity and model selection are resolved by the platform model router.
 - Persistent thread registration via Postgres
 - Runtime heartbeat/session side-channel via Redis
 
@@ -78,7 +86,7 @@ Event types emitted by `POST /agent/stream`:
 Streaming behavior details:
 
 - `content` events are emitted from live `on_chat_model_stream` token chunks (incremental, not post-hoc chunking).
-- `reasoning` events are emitted from tool outputs (`on_tool_end`) when the agent actually invokes tools.
+- `reasoning` events are safe progress summaries emitted when tools finish. Raw tool inputs/outputs are not relayed or persisted as reasoning.
 - If a run completes without tool invocations, reasoning panes should remain empty by design (`tool_message_count=0`).
 
 ## Persistence and Retrieval
@@ -115,12 +123,12 @@ LangGraph CLI graph config:
 
 - `LANGGRAPH_POSTGRES_DSN`
 - `LANGGRAPH_REDIS_URL`
-- `LANGGRAPH_OLLAMA_PRIMARY_BASE_URL`
 - `LANGGRAPH_OLLAMA_PRIMARY_MODEL`
-- `LANGGRAPH_OLLAMA_FALLBACK_CLOUD_BASE_URL`
 - `LANGGRAPH_OLLAMA_FALLBACK_CLOUD_MODEL`
-- `LANGGRAPH_OLLAMA_FALLBACK_LOCAL_BASE_URL`
-- `LANGGRAPH_OLLAMA_FALLBACK_LOCAL_MODEL`
+- `LANGGRAPH_MODEL_ROUTER_URL`
+- `LANGGRAPH_MODEL_ROUTER_TOKEN`
+- `LANGGRAPH_SERVICE_TOKEN`
+- `LANGGRAPH_RUNTIME_TOKEN`
 - `LANGGRAPH_AGENT_PROMPT_MANIFEST_PATH`
 - `LANGGRAPH_AGENT_PROMPT_HUB_IDENTIFIER` (optional)
 - `LANGGRAPH_AGENT_SYSTEM_PROMPT_FALLBACK`
@@ -156,7 +164,7 @@ A first-party terminal UI client is included for direct LangGraph interaction wi
 
 Run from repository root:
 
-- `scripts/langgraph-tui --langgraph-url http://localhost:8080`
+- `docker compose exec langgraph-service python -m app.tui_cli --log-file /tmp/langgraph-tui.jsonl`
 
 Options:
 
@@ -190,7 +198,7 @@ TUI behavior:
 - `langgraph-service` container
 - `postgres` (thread persistence)
 - `redis` (runtime operational channel)
-- LangSmith env forwarding and Ollama endpoint wiring
+- LangSmith env forwarding and authenticated model-router wiring
 
 Start full stack:
 

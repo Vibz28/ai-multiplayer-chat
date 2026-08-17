@@ -18,6 +18,7 @@ class SessionResponse(BaseModel):
     langsmith_trace_id: str | None
     created_at: datetime
     updated_at: datetime
+    room_token: str | None = None
 
 
 class ThreadResponse(BaseModel):
@@ -67,14 +68,35 @@ class SessionChecklistResponse(BaseModel):
     count: int
 
 
+class ArtifactResponse(BaseModel):
+    artifact_id: str
+    filename: str
+    title: str
+    description: str
+    kind: str
+    media_type: str
+    size_bytes: int
+    sha256: str
+    download_ref: str
+    immutable: bool
+
+
+class SessionArtifactsResponse(BaseModel):
+    application_id: str
+    items: list[ArtifactResponse]
+    count: int
+
+
 class WebSocketInboundMessage(BaseModel):
     type: Literal["ping", "user_message", "join", "leave"]
     content: str | None = Field(default=None, max_length=8000)
     profile_id: str | None = Field(default=None, max_length=128)
     role: str | None = Field(default="member", max_length=64)
     include_ai: bool = True
-    delivery_mode: Literal["thread", "direct"] = "thread"
-    recipient_profile_ids: list[str] = Field(default_factory=list, max_length=16)
+    delivery_mode: Literal["thread"] = "thread"
+    recipient_profile_ids: list[str] = Field(default_factory=list, max_length=0)
+    harness: Literal["langgraph", "opencode", "codex", "claude_code", "pi"] = "langgraph"
+    client_request_id: str | None = Field(default=None, max_length=128)
 
 
 class EventEnvelope(BaseModel):

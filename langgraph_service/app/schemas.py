@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -26,6 +26,7 @@ class AgentRunRequest(BaseModel):
     thread_id: str
     profile_id: str | None = None
     message: str
+    harness: Literal["langgraph", "opencode", "codex", "claude_code", "pi"] = "langgraph"
 
 
 class AgentRunResponse(BaseModel):

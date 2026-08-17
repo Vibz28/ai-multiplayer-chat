@@ -119,7 +119,7 @@ def extract_tool_calls(assistant_messages: list[AIMessage]) -> list[dict[str, An
                     "id": str(call.get("id", "")),
                     "name": str(call.get("name", "unknown")),
                     "type": str(call.get("type", "tool_call")),
-                    "args": args if isinstance(args, dict) else {"value": str(args)},
+                    "argument_names": sorted(str(name) for name in args) if isinstance(args, dict) else [],
                 }
             )
     return tool_calls
@@ -160,12 +160,13 @@ def build_run_diagnostics(
         "langsmith_project": settings.langsmith_project,
         "langsmith_endpoint": getenv("LANGSMITH_ENDPOINT"),
         "langsmith_tracing_enabled": settings.langsmith_tracing,
-        "model_provider": "ollama",
-        "model_primary": settings.ollama_primary_model,
-        "model_fallbacks": [
-            settings.ollama_fallback_cloud_model,
-            settings.ollama_fallback_local_model,
-        ],
+        "requested_harness": request.harness,
+        "executed_harness": request.harness,
+        "model_provider": "ollama_cloud" if request.harness == "langgraph" else request.harness,
+        "model_primary": settings.ollama_primary_model if request.harness == "langgraph" else None,
+        "model_fallbacks": (
+            [settings.ollama_fallback_cloud_model] if request.harness == "langgraph" else []
+        ),
         "model_selected": model_selected,
         "token_usage": token_usage or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
         "tool_calls": tool_calls or [],
@@ -181,5 +182,5 @@ def build_run_diagnostics(
         "finished_at": finished_at.isoformat() if finished_at is not None else None,
         "latency_ms": latency_ms,
         "error": error,
-        "tags": ["langgraph", "streaming", "tui-compatible"],
+        "tags": ["langgraph", "streaming", "tui-compatible", request.harness],
     }

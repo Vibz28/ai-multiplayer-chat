@@ -12,7 +12,7 @@ This project now uses a script-first Docker workflow that supports:
 
 From repo root:
 
-- `scripts/stack up` (full stack: frontend + backend + langgraph + postgres + redis + dynamodb-local)
+- `scripts/stack up` (full stack, including credential-free worker and credential-bearing harness runtimes)
 - `scripts/stack smoke` (health checks)
 - `scripts/stack logs backend` (tail specific logs)
 - `STACK_LOG_FOLLOW=0 scripts/stack logs backend` (non-following snapshot for CI/debug)
@@ -55,12 +55,13 @@ The script creates repositories if missing and publishes:
 - `<account>.dkr.ecr.<region>.amazonaws.com/ai-multiplayer-chat/backend:<tag>`
 - `<account>.dkr.ecr.<region>.amazonaws.com/ai-multiplayer-chat/langgraph-service:<tag>`
 - `<account>.dkr.ecr.<region>.amazonaws.com/ai-multiplayer-chat/frontend:<tag>`
+- `<account>.dkr.ecr.<region>.amazonaws.com/ai-multiplayer-chat/worker-runtime:<tag>`
 
 ## 3) ECS Rollout (after task definitions reference new tag)
 
 Trigger rolling deployments:
 
-- `ECS_CLUSTER=<cluster> ECS_BACKEND_SERVICE=<svc> ECS_LANGGRAPH_SERVICE=<svc> ECS_FRONTEND_SERVICE=<svc> scripts/deploy-ecs`
+- `ECS_CLUSTER=<cluster> ECS_BACKEND_SERVICE=<svc> ECS_LANGGRAPH_SERVICE=<svc> ECS_FRONTEND_SERVICE=<svc> ECS_WORKER_RUNTIME_SERVICE=<svc> ECS_CODEX_RUNTIME_SERVICE=<svc> ECS_CLAUDE_RUNTIME_SERVICE=<svc> ECS_OPENCODE_RUNTIME_SERVICE=<svc> ECS_PI_RUNTIME_SERVICE=<svc> scripts/deploy-ecs`
 - `DRY_RUN=1 ECS_CLUSTER=<cluster> ECS_BACKEND_SERVICE=<svc> scripts/deploy-ecs` (safe command preview)
 
 At least one service variable must be provided.
@@ -95,12 +96,17 @@ Recommended production architecture:
   - frontend container
   - backend container
   - langgraph-service container
+  - credential-free worker-runtime container
+  - one internal model-router service, one platform provider-account volume, and four harness runtime containers using the same adapter image
 - Managed stores:
   - DynamoDB for application/session metadata and workflow mapping
   - RDS Postgres for thread/run history
   - ElastiCache Redis for runtime signaling/cache
+  - EFS for the Compose-equivalent shared demo workspace, or preferably S3 plus disposable per-job workspaces/artifacts
 
 For production, replace local endpoints in env vars:
 
 - backend: `BACKEND_DYNAMODB_ENDPOINT_URL` should target AWS DynamoDB (or be unset)
 - langgraph: `LANGGRAPH_POSTGRES_DSN`, `LANGGRAPH_REDIS_URL` should target RDS/ElastiCache
+- runtime services: use one disposable task per assignment in production; do not carry personal subscription credentials into a shared multi-user service
+- do not deploy the worker/provider services as independent ECS filesystems and expect Compose named-volume sharing; provision EFS or externalize workspaces and artifacts first

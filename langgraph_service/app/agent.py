@@ -10,7 +10,19 @@ from langchain_ollama import ChatOllama
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
-from app.agent_tooling import get_checklist_items, manage_checklist
+from app.agent_tooling import (
+    fetch_web,
+    get_checklist_items,
+    list_workspace,
+    manage_checklist,
+    read_workspace_file,
+    register_artifact,
+    workspace_edit,
+    workspace_exec,
+    workspace_read,
+    workspace_search,
+    write_workspace_file,
+)
 from app.config import get_settings
 from app.prompt_loader import load_agent_prompt_template
 
@@ -61,29 +73,40 @@ def _extract_user_message(messages: list[Any]) -> str:
 
 def get_compiled_graph() -> Any:
     settings = get_settings()
+    router_client = {"headers": {"Authorization": f"Bearer {settings.model_router_token}"}}
 
     primary_llm = ChatOllama(
         model=settings.ollama_primary_model,
-        base_url=settings.ollama_primary_base_url,
+        base_url=settings.model_router_url,
         temperature=0,
+        client_kwargs=router_client,
+        async_client_kwargs=router_client,
     )
     fallback_cloud_llm = ChatOllama(
         model=settings.ollama_fallback_cloud_model,
-        base_url=settings.ollama_fallback_cloud_base_url,
+        base_url=settings.model_router_url,
         temperature=0,
+        client_kwargs=router_client,
+        async_client_kwargs=router_client,
     )
-    fallback_local_llm = ChatOllama(
-        model=settings.ollama_fallback_local_model,
-        base_url=settings.ollama_fallback_local_base_url,
-        temperature=0,
-    )
-    llm = primary_llm.with_fallbacks([fallback_cloud_llm, fallback_local_llm])
+    llm = primary_llm.with_fallbacks([fallback_cloud_llm])
 
     prompt_template = load_agent_prompt_template(settings)
 
     react_agent = create_agent(
         model=llm,
-        tools=[get_utc_time, add_numbers, describe_session_context, manage_checklist],
+        tools=[
+            get_utc_time,
+            add_numbers,
+            describe_session_context,
+            manage_checklist,
+            workspace_search,
+            workspace_read,
+            workspace_edit,
+            workspace_exec,
+            fetch_web,
+            register_artifact,
+        ],
         system_prompt=None,
         name="react_autonomous_node",
     )
@@ -140,5 +163,8 @@ __all__ = [
     "get_checklist_items",
     "get_compiled_graph",
     "get_utc_time",
+    "list_workspace",
     "manage_checklist",
+    "read_workspace_file",
+    "write_workspace_file",
 ]

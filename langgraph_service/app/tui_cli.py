@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import curses
 import json
+import os
 import shutil
 import subprocess
 import textwrap
@@ -144,11 +145,16 @@ def viewport_slice(lines: list[str], inner_height: int, offset: int) -> tuple[li
     return lines[start:end], max_offset
 
 
-def ensure_thread(base_url: str, application_id: str) -> str:
+def _service_headers(service_token: str) -> dict[str, str]:
+    return {"X-Fieldwork-Service-Token": service_token}
+
+
+def ensure_thread(base_url: str, application_id: str, service_token: str = "") -> str:
     with httpx.Client(timeout=20.0) as client:
         response = client.post(
             f"{base_url.rstrip('/')}/threads",
             json={"application_id": application_id},
+            headers=_service_headers(service_token),
         )
         response.raise_for_status()
         payload = response.json()
@@ -158,11 +164,17 @@ def ensure_thread(base_url: str, application_id: str) -> str:
     return thread_id
 
 
-def fetch_thread_history(base_url: str, thread_id: str, limit: int = 300) -> list[dict[str, Any]]:
+def fetch_thread_history(
+    base_url: str,
+    thread_id: str,
+    limit: int = 300,
+    service_token: str = "",
+) -> list[dict[str, Any]]:
     with httpx.Client(timeout=20.0) as client:
         response = client.get(
             f"{base_url.rstrip('/')}/threads/{thread_id}/history",
             params={"limit": limit},
+            headers=_service_headers(service_token),
         )
         response.raise_for_status()
         payload = response.json()
@@ -179,6 +191,7 @@ def stream_agent_events(
     thread_id: str,
     profile_id: str | None,
     message: str,
+    service_token: str = "",
 ):
     request_payload = {
         "application_id": application_id,
@@ -191,6 +204,7 @@ def stream_agent_events(
             "POST",
             f"{base_url.rstrip('/')}/agent/stream",
             json=request_payload,
+            headers=_service_headers(service_token),
         ) as response:
             response.raise_for_status()
             for line in response.iter_lines():
@@ -215,12 +229,14 @@ class LangGraphTui:
         profile_id: str | None,
         thread_id: str | None,
         log_file: Path,
+        service_token: str = "",
     ) -> None:
         self.base_url = base_url
         self.application_id = application_id
         self.profile_id = profile_id
         self.thread_id = thread_id
         self.log_file = log_file
+        self.service_token = service_token
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
 
         self._event_queue: Queue[dict[str, Any]] = Queue()
@@ -282,7 +298,12 @@ class LangGraphTui:
         if self._history_loaded or self.thread_id is None:
             return
         try:
-            entries = fetch_thread_history(self.base_url, self.thread_id, limit=300)
+            entries = fetch_thread_history(
+                self.base_url,
+                self.thread_id,
+                limit=300,
+                service_token=self.service_token,
+            )
         except Exception:
             return
 
@@ -879,7 +900,11 @@ class LangGraphTui:
     def _stream_worker(self, message: str) -> None:
         try:
             if self.thread_id is None:
-                self.thread_id = ensure_thread(self.base_url, self.application_id)
+                self.thread_id = ensure_thread(
+                    self.base_url,
+                    self.application_id,
+                    self.service_token,
+                )
                 self._event_queue.put(
                     {
                         "type": "status",
@@ -894,6 +919,7 @@ class LangGraphTui:
                 thread_id=self.thread_id,
                 profile_id=self.profile_id,
                 message=message,
+                service_token=self.service_token,
             ):
                 self._event_queue.put(event)
         except Exception as exc:  # pragma: no cover - curses runtime surface
@@ -1330,6 +1356,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Application ID used to resolve or create a thread.",
     )
     parser.add_argument(
+        "--service-token",
+        default=os.environ.get("LANGGRAPH_SERVICE_TOKEN", ""),
+        help="Internal LangGraph service token.",
+    )
+    parser.add_argument(
         "--profile-id",
         default="cli-user",
         help="Profile identifier sent to the LangGraph run.",
@@ -1355,6 +1386,7 @@ def main() -> None:
         profile_id=args.profile_id,
         thread_id=args.thread_id,
         log_file=Path(args.log_file),
+        service_token=args.service_token,
     )
     app.run()
 
