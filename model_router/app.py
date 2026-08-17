@@ -19,7 +19,8 @@ ROUTER_TOKEN = os.environ.get("MODEL_ROUTER_TOKEN", "")
 UPSTREAM_URL = os.environ.get("MODEL_ROUTER_OLLAMA_CLOUD_URL", "http://host.docker.internal:11434").rstrip("/")
 PRIMARY_MODEL = os.environ.get("MODEL_ROUTER_PRIMARY_MODEL", "kimi-k2.7-code:cloud")
 FALLBACK_MODEL = os.environ.get("MODEL_ROUTER_FALLBACK_MODEL", "gpt-oss:120b-cloud")
-CHATGPT_SUBSCRIPTION_MODEL = os.environ.get("MODEL_ROUTER_CHATGPT_MODEL", "gpt-5.3-codex")
+CHATGPT_SUBSCRIPTION_MODEL = os.environ.get("MODEL_ROUTER_CHATGPT_MODEL", "gpt-5.6-sol")
+CODEX_SUBSCRIPTION_MODEL = os.environ.get("MODEL_ROUTER_CODEX_MODEL", "").strip() or None
 CLAUDE_SUBSCRIPTION_MODEL = os.environ.get("MODEL_ROUTER_CLAUDE_MODEL", "claude-sonnet-4-6")
 AUTH_ROOT = Path(os.environ.get("MODEL_ROUTER_AUTH_ROOT", "/auth/platform"))
 ALLOWED_MODELS = {PRIMARY_MODEL, FALLBACK_MODEL}
@@ -173,7 +174,9 @@ def resolve_route(request: RouteRequest) -> dict[str, Any]:
             "mode": "native_subscription",
             "provider": provider,
             "model": (
-                CHATGPT_SUBSCRIPTION_MODEL
+                CODEX_SUBSCRIPTION_MODEL
+                if request.harness == "codex"
+                else CHATGPT_SUBSCRIPTION_MODEL
                 if provider == "chatgpt_subscription"
                 else CLAUDE_SUBSCRIPTION_MODEL
             ),

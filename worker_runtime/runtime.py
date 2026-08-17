@@ -723,7 +723,7 @@ def _harness_command(
     route: dict[str, Any] | None = None,
 ) -> tuple[list[str], str | None, dict[str, str]]:
     base_env = {"PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8", "TMPDIR": "/tmp"}
-    model = str(route.get("model", "")) if route else ""
+    model = str(route.get("model") or "") if route else ""
     provider = str(route.get("provider", "")) if route else ""
     mode = str(route.get("mode", "native_subscription")) if route else "native_subscription"
     if harness == "codex":

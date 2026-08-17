@@ -173,25 +173,30 @@ case "$cmd" in
     case "$provider:$integration" in
       chatgpt:codex)
         compose up -d --build codex-runtime
+        compose exec -T codex-runtime install -d -m 700 /auth/platform/chatgpt/codex
         compose exec --env HOME=/auth/platform/chatgpt/codex --env CODEX_HOME=/auth/platform/chatgpt/codex codex-runtime codex login --device-auth
         ;;
       chatgpt:opencode)
         echo "Select OpenAI, then ChatGPT Plus/Pro in OpenCode's provider login."
         compose up -d --build opencode-runtime
+        compose exec -T opencode-runtime install -d -m 700 /auth/platform/chatgpt/opencode
         compose exec --env HOME=/auth/platform/chatgpt/opencode opencode-runtime opencode auth login
         ;;
       chatgpt:pi)
         echo "Run /login, select ChatGPT Plus/Pro (Codex), then exit Pi."
         compose up -d --build pi-runtime
+        compose exec -T pi-runtime install -d -m 700 /auth/platform/shared/pi
         compose exec --env HOME=/auth/platform/shared/pi --env PI_CODING_AGENT_DIR=/auth/platform/shared/pi pi-runtime pi --no-extensions --no-skills
         ;;
       claude:claude-code|claude:claude_code)
         compose up -d --build claude-runtime
+        compose exec -T claude-runtime install -d -m 700 /auth/platform/claude/claude-code
         compose exec --env HOME=/auth/platform/claude/claude-code --env CLAUDE_CONFIG_DIR=/auth/platform/claude/claude-code claude-runtime claude auth login
         ;;
       claude:pi)
         echo "Run /login, select Claude Pro/Max, then exit Pi. Claude may bill third-party extra usage."
         compose up -d --build pi-runtime
+        compose exec -T pi-runtime install -d -m 700 /auth/platform/shared/pi
         compose exec --env HOME=/auth/platform/shared/pi --env PI_CODING_AGENT_DIR=/auth/platform/shared/pi pi-runtime pi --no-extensions --no-skills
         ;;
       *)

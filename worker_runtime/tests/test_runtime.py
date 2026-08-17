@@ -169,6 +169,13 @@ def test_harness_commands_are_direct_argv(harness: str, tmp_path: Path) -> None:
         assert stdin == "do the work"
 
 
+def test_codex_uses_subscription_default_when_route_has_no_model(tmp_path: Path) -> None:
+    route = {"mode": "native_subscription", "provider": "chatgpt_subscription", "model": None}
+    argv, _, _ = runtime._harness_command("codex", tmp_path, "test", route=route)
+
+    assert "--model" not in argv
+
+
 @pytest.mark.parametrize(
     ("harness", "output", "expected"),
     [

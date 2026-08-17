@@ -17,7 +17,9 @@ def test_route_resolution_uses_compatible_platform_grants(tmp_path: Path, monkey
     pi_auth.parent.mkdir(parents=True)
     pi_auth.write_text(json.dumps({"anthropic": {"type": "oauth"}}), encoding="utf-8")
 
-    assert router.resolve_route(router.RouteRequest(harness="codex"))["provider"] == "chatgpt_subscription"
+    codex_route = router.resolve_route(router.RouteRequest(harness="codex"))
+    assert codex_route["provider"] == "chatgpt_subscription"
+    assert codex_route["model"] == router.CODEX_SUBSCRIPTION_MODEL
     assert router.resolve_route(router.RouteRequest(harness="pi"))["provider"] == "claude_subscription"
     assert router.resolve_route(router.RouteRequest(harness="opencode"))["provider"] == "ollama_cloud"
 
